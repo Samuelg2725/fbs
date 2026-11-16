@@ -68,19 +68,21 @@ def take_lines(pending, chunk):
     return lines, pending
 
 
-def read_group(earfcn, hz, gain, group, known, search_s=4.0, sib1_s=6.0, miss_limit=3):
+def read_group(earfcn, hz, gain, group, known, search_s=4.0, sib1_s=6.0, miss_limit=3,
+               rf_args="driver=plutosdr"):
     """Read the strongest cell in one sync group. Return its 28-bit identity, or None.
 
     search_s   seconds to look for a tower before giving up on this group.
     sib1_s     seconds to wait for the cell ID once a tower is found.
     miss_limit give up early after pdsch_ue reports "no cell" this many times.
+    rf_args     SoapySDR args for pdsch_ue, e.g. "driver=plutosdr,uri=ip:10.1.2.11".
     """
     say("group %d  listening" % group)
     command = [
         "stdbuf", "-oL", "-eL",
         _PDSCH,
         "-I", "soapy",
-        "-a", "driver=plutosdr",
+        "-a", rf_args,
         "-f", str(hz),
         "-g", str(gain),
         "-Q",
@@ -211,6 +213,12 @@ def main(argv=None):
     parser.add_argument("--earfcn", type=int, required=True, help="LTE downlink channel number")
     parser.add_argument("--gain", type=float, default=70.0, help="Pluto gain passed to pdsch_ue")
     parser.add_argument(
+        "--pluto-uri",
+        default="ip:10.1.2.11",
+        help="SoapySDR uri for the Pluto, e.g. ip:10.1.2.11 (Ethernet) or usb: . "
+             "Pass an empty string to let Soapy auto-pick (may use USB).",
+    )
+    parser.add_argument(
         "--cell-id",
         type=int,
         action="append",
@@ -256,8 +264,13 @@ def main(argv=None):
     if not os.path.isfile(_PDSCH) or not os.access(_PDSCH, os.X_OK):
         sys.exit("pdsch_ue was not found at %s" % _PDSCH)
 
+    rf_args = "driver=plutosdr"
+    if args.pluto_uri:
+        rf_args += ",uri=%s" % args.pluto_uri
+
     say("%d Hz  EARFCN %d" % (hz, args.earfcn))
     say("groups %s, strongest cell in each, then repeat. Ctrl+C stops." % " ".join(str(group) for group in groups))
+    say("radio: %s" % rf_args)
     say("timeouts: %.0f s search, %.0f s SIB1, bail after %d empty reports"
         % (args.search_timeout, args.sib1_timeout, args.miss_limit))
     if args.cell_id:
@@ -271,6 +284,7 @@ def main(argv=None):
                     search_s=args.search_timeout,
                     sib1_s=args.sib1_timeout,
                     miss_limit=args.miss_limit,
+                    rf_args=rf_args,
                 )
             say("pass done")
     except KeyboardInterrupt:
