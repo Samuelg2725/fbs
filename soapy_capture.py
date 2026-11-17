@@ -47,18 +47,19 @@ def capture(
 ):
     """One baseband capture. centre_hz is the LTE downlink centre.
 
-    Returns the conditioned baseband samples and the Unix time taken just
-    before the stream starts. low_if_hz is 0 for the LimeSDR; pass a non-zero
+    Returns (samples, unix_time, clean). clean is False when the radio
+    reported dropped samples (a USB overflow) during the capture, which
+    corrupts the frames. low_if_hz is 0 for the LimeSDR; pass a non-zero
     value only for a radio that needs the tune moved off the cell centre.
     """
     count = int(round(float(sample_rate) * float(seconds)))
     tune = float(centre_hz) + float(low_if_hz)
     if antenna is None:
         antenna = rx_antenna(driver, tune)
-    raw, capture_timestamp = _soapy(
+    raw, capture_timestamp, clean = _soapy(
         tune, float(sample_rate), count, float(gain), driver, antenna, device_args,
     )
-    return condition(raw, sample_rate, low_if_hz), capture_timestamp
+    return condition(raw, sample_rate, low_if_hz), capture_timestamp, clean
 
 
 def save_capture(path, samples) -> None:
@@ -86,7 +87,7 @@ def find_devices(driver: str | None = None) -> list:
 
 def _soapy(tune_hz, sample_rate, count, gain, driver, antenna, device_args):
     import SoapySDR  # noqa: PLC0415
-    from SoapySDR import SOAPY_SDR_CF32, SOAPY_SDR_RX
+    from SoapySDR import SOAPY_SDR_CF32, SOAPY_SDR_OVERFLOW, SOAPY_SDR_RX, SOAPY_SDR_TIMEOUT
 
     device = SoapySDR.Device(_build_args(driver, device_args))
     channel = 0
@@ -116,7 +117,12 @@ def _soapy(tune_hz, sample_rate, count, gain, driver, antenna, device_args):
             except Exception:
                 pass
 
-    stream = device.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [channel])
+    # A bigger host-side buffer gives macOS more slack before the radio's FIFO
+    # overflows. Unknown args are ignored by drivers that do not use them.
+    try:
+        stream = device.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [channel], {"bufferLength": "65536"})
+    except Exception:
+        stream = device.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [channel])
     output = np.zeros(count, dtype=np.complex64)
     device.activateStream(stream)
     # Drop the first ~0.15 s. The front end settles after the stream starts and
@@ -133,15 +139,28 @@ def _soapy(tune_hz, sample_rate, count, gain, driver, antenna, device_args):
         discarded += status.ret
     capture_timestamp = time.time()
     filled = 0
+    clean = True
+    stalls = 0
     try:
         while filled < count:
             chunk = np.zeros(min(1 << 16, count - filled), dtype=np.complex64)
             status = device.readStream(stream, [chunk], len(chunk), timeoutUs=1_000_000)
-            if status.ret <= 0:
-                raise RuntimeError("%s stream stopped (%s)" % (driver, status.ret))
+            if status.ret == SOAPY_SDR_OVERFLOW:
+                # The radio's FIFO overran and samples were lost. The capture is
+                # no longer contiguous, so flag it and keep reading to fill the
+                # buffer; the caller will retry for a clean one.
+                clean = False
+                continue
+            if status.ret == SOAPY_SDR_TIMEOUT or status.ret == 0:
+                stalls += 1
+                if stalls > 20:
+                    raise RuntimeError("%s stream produced no samples" % driver)
+                continue
+            if status.ret < 0:
+                raise RuntimeError("%s stream error (%s)" % (driver, status.ret))
             output[filled:filled + status.ret] = chunk[: status.ret]
             filled += status.ret
     finally:
         device.deactivateStream(stream)
         device.closeStream(stream)
-    return output, capture_timestamp
+    return output, capture_timestamp, clean

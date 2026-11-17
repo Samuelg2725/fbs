@@ -105,3 +105,27 @@ saying SIB1 isn't in the capture — bump `--rate` and try again.
 The frequency you pass must be the **centre** of the cell, not the edge of the
 operator's block. `cellular_resolver.py` converts any EARFCN to its exact
 downlink centre if you prefer `--earfcn`.
+
+## If it says "radio dropped samples (USB overflow)"
+
+This is the main limitation of the LimeSDR on macOS. The `libusb ...
+abort_transfers` messages and dropped samples mean LimeSuite's macOS USB
+support is losing chunks of the stream mid-capture. It happens even at low
+sample rates, because it is a USB *reliability* problem, not a bandwidth one.
+Dropped samples break the MIB/SIB1 decode (the PCI still reads fine, because
+sync is robust to a few missing samples).
+
+Things that help a bit:
+- Re-run; `--attempts` already retries and keeps the best clean capture.
+- Lower the sample rate: `--rate 1920000` (PCI + MIB only), then `7.68e6`.
+- Close other heavy USB users; try a direct Thunderbolt/USB-C dock, not a hub.
+- `LimeUtil --update` once, to flash current board gateware.
+
+The reliable fix: **run on Linux.** The LimeSDR-USB streams cleanly over USB 3
+on Linux, which also unlocks the wide 15.36 MS/s capture needed to read the
+full 28-bit Cell ID (SIB1) of a 5/10/20 MHz cell. The code here is the same on
+Linux — install `numpy`, `scipy`, `soapysdr`, and `limesuite` (SoapySDR LMS7
+module) with your package manager, then run `lte_scan.py` exactly as above. A
+cheap Linux box (an old laptop, or a Raspberry Pi 4/5) is enough. On macOS you
+can still reliably get the tower (PCI) and its MIB; the full Cell ID is what the
+macOS USB drops get in the way of.

@@ -203,9 +203,11 @@ def main(argv=None) -> int:
     attempts = max(1, args.attempts)
     best_text = None
     best_score = -2
+    saved = False
+    drops = 0
     for index in range(attempts):
         try:
-            samples, capture_timestamp = capture(
+            samples, capture_timestamp, clean = capture(
                 freq_mhz * 1e6,
                 sample_rate=args.rate,
                 seconds=args.seconds,
@@ -218,9 +220,15 @@ def main(argv=None) -> int:
         except ImportError:
             print("SoapySDR is not installed. See SETUP_MAC_LIMESDR.md.", file=sys.stderr)
             return 1
-        if args.save and index == 0:
+        if not clean:
+            drops += 1
+            print("attempt %d/%d: radio dropped samples (USB overflow), retrying..." % (index + 1, attempts), flush=True)
+            if index < attempts - 1:
+                continue
+        if args.save and not saved:
             save_capture(args.save, samples)
             print("Saved %d samples to %s" % (len(samples), args.save))
+            saved = True
         text, score = decode_capture(samples, args.rate, freq_mhz, earfcn, args.pci, capture_timestamp, args.cell_id)
         if score > best_score:
             best_text, best_score = text, score
@@ -228,6 +236,12 @@ def main(argv=None) -> int:
             break
         if index < attempts - 1:
             print("attempt %d/%d: score %d, retrying..." % (index + 1, attempts, score), flush=True)
+    if best_text is None:
+        print("Every capture dropped samples (USB overflow). The LimeSDR is not")
+        print("streaming cleanly on this Mac. See the note at the end of SETUP_MAC_LIMESDR.md.")
+        return 1
+    if drops:
+        print("(%d of %d captures dropped samples; LimeSDR USB streaming on macOS is unreliable)" % (drops, attempts))
     print(best_text)
     return 0
 
