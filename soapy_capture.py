@@ -67,29 +67,31 @@ def save_capture(path, samples) -> None:
     np.asarray(samples, dtype=np.complex64).tofile(path)
 
 
-def _build_args(driver: str, device_args: str | None) -> dict:
-    args = {"driver": driver}
+def _device_markup(driver: str, device_args: str | None) -> str:
+    """SoapySDR device args as a markup string, e.g. "driver=lime,serial=0009...".
+
+    The string form is what SoapySDRUtil uses; some SoapySDR Python bindings
+    reject a dict here with "Device::make() no match", so a string is passed.
+    """
+    parts = ["driver=%s" % driver]
     if device_args:
-        for pair in device_args.split(","):
-            if "=" in pair:
-                key, value = pair.split("=", 1)
-                args[key.strip()] = value.strip()
-    return args
+        parts.append(device_args.strip())
+    return ",".join(parts)
 
 
 def find_devices(driver: str | None = None) -> list:
     """List the Soapy radios present, for a 'is my LimeSDR seen?' check."""
     import SoapySDR  # noqa: PLC0415
 
-    query = {} if driver is None else {"driver": driver}
-    return [dict(result) for result in SoapySDR.Device.enumerate(query)]
+    results = SoapySDR.Device.enumerate() if not driver else SoapySDR.Device.enumerate("driver=%s" % driver)
+    return [dict(result) for result in results]
 
 
 def _soapy(tune_hz, sample_rate, count, gain, driver, antenna, device_args):
     import SoapySDR  # noqa: PLC0415
     from SoapySDR import SOAPY_SDR_CF32, SOAPY_SDR_OVERFLOW, SOAPY_SDR_RX, SOAPY_SDR_TIMEOUT
 
-    device = SoapySDR.Device(_build_args(driver, device_args))
+    device = SoapySDR.Device(_device_markup(driver, device_args))
     channel = 0
     device.setSampleRate(SOAPY_SDR_RX, channel, float(sample_rate))
     if antenna:
