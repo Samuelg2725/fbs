@@ -119,10 +119,18 @@ def _soapy(tune_hz, sample_rate, count, gain, driver, antenna, device_args):
     stream = device.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [channel])
     output = np.zeros(count, dtype=np.complex64)
     device.activateStream(stream)
-    # Drop the first block. The front end settles after the stream starts, and
-    # a gain change leaves a transient that would sit on the first frames.
-    warmup = np.zeros(min(1 << 16, count), dtype=np.complex64)
-    device.readStream(stream, [warmup], len(warmup), timeoutUs=1_000_000)
+    # Drop the first ~0.15 s. The front end settles after the stream starts and
+    # the LMS7 Rx calibration leaves a transient; keeping it would sit on the
+    # first frames and corrupt the MIB. Discarding it also lets the USB link
+    # reach steady state before the frames that matter are read.
+    flush = int(0.15 * float(sample_rate))
+    discarded = 0
+    while discarded < flush:
+        warmup = np.zeros(min(1 << 16, flush - discarded), dtype=np.complex64)
+        status = device.readStream(stream, [warmup], len(warmup), timeoutUs=1_000_000)
+        if status.ret <= 0:
+            break
+        discarded += status.ret
     capture_timestamp = time.time()
     filled = 0
     try:

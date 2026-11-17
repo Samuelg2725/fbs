@@ -96,10 +96,11 @@ def _report(freq_mhz, earfcn, hit, result, capture_timestamp=None, target_cell_i
 
 
 def decode_capture(samples, sample_rate, freq_mhz, earfcn=None, pci=None, capture_timestamp=None, target_cell_id=None):
+    """Decode one capture. Returns (text, score): 2 cell id, 1 MIB, 0 PCI only, -1 nothing."""
     report = search_samples(np.asarray(samples), sample_rate)
     hits = report["hits"]
     if not hits and pci is None:
-        return (
+        text = (
             "No LTE cell at %.3f MHz\nBest PSS %.1fx at %+.1f kHz, SSS %.2f (needs %.2f)"
             % (
                 freq_mhz,
@@ -109,6 +110,7 @@ def decode_capture(samples, sample_rate, freq_mhz, earfcn=None, pci=None, captur
                 report["sss_min"],
             )
         )
+        return text, -1
     if hits:
         hit = hits[0]
     else:
@@ -124,7 +126,8 @@ def decode_capture(samples, sample_rate, freq_mhz, earfcn=None, pci=None, captur
     extras = [int(item["pci"]) for item in hits[1:]]
     if extras:
         text += "\nAlso heard PCI %s" % ", ".join(str(item) for item in extras)
-    return text
+    score = 2 if result.get("cell_id") is not None else (1 if result.get("bandwidth_rb") else 0)
+    return text, score
 
 
 def self_test() -> bool:
@@ -149,6 +152,7 @@ def main(argv=None) -> int:
     parser.add_argument("--save", help="write the baseband complex64 capture here")
     parser.add_argument("--rate", type=float, default=DEFAULT_RATE, help="sample rate in Hz (default 15.36e6)")
     parser.add_argument("--seconds", type=float, default=DEFAULT_SECONDS)
+    parser.add_argument("--attempts", type=int, default=4, help="capture this many times and keep the best decode (flaky USB)")
     parser.add_argument("--gain", type=float, default=DEFAULT_GAIN, help="overall RX gain in dB")
     parser.add_argument("--driver", default=DEFAULT_DRIVER, help="Soapy driver (default lime)")
     parser.add_argument("--antenna", help="force an RX port, e.g. LNAL or LNAH")
@@ -189,11 +193,17 @@ def main(argv=None) -> int:
         print("Pass --earfcn, --freq-mhz, --file (with --freq-mhz), --list-devices or --self-test.", file=sys.stderr)
         return 1
 
-    capture_timestamp = None
     if args.file:
         samples = np.fromfile(args.file, dtype=np.complex64)
         print("Searching %s" % args.file, flush=True)
-    else:
+        text, _score = decode_capture(samples, args.rate, freq_mhz, earfcn, args.pci, None, args.cell_id)
+        print(text)
+        return 0
+
+    attempts = max(1, args.attempts)
+    best_text = None
+    best_score = -2
+    for index in range(attempts):
         try:
             samples, capture_timestamp = capture(
                 freq_mhz * 1e6,
@@ -208,11 +218,17 @@ def main(argv=None) -> int:
         except ImportError:
             print("SoapySDR is not installed. See SETUP_MAC_LIMESDR.md.", file=sys.stderr)
             return 1
-        if args.save:
+        if args.save and index == 0:
             save_capture(args.save, samples)
             print("Saved %d samples to %s" % (len(samples), args.save))
-
-    print(decode_capture(samples, args.rate, freq_mhz, earfcn, args.pci, capture_timestamp, args.cell_id))
+        text, score = decode_capture(samples, args.rate, freq_mhz, earfcn, args.pci, capture_timestamp, args.cell_id)
+        if score > best_score:
+            best_text, best_score = text, score
+        if score >= 2:
+            break
+        if index < attempts - 1:
+            print("attempt %d/%d: score %d, retrying..." % (index + 1, attempts, score), flush=True)
+    print(best_text)
     return 0
 
 
