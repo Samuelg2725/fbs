@@ -302,12 +302,25 @@ def main(argv=None):
         description="Read the cells on one EARFCN. This file does not decode."
     )
     parser.add_argument("--earfcn", type=int, required=True, help="LTE downlink channel number")
-    parser.add_argument("--gain", type=float, default=70.0, help="Pluto gain passed to pdsch_ue")
+    parser.add_argument("--gain", type=float, default=70.0, help="RX gain in dB passed to pdsch_ue")
+    parser.add_argument(
+        "--sdr",
+        choices=["lime", "pluto"],
+        default="lime",
+        help="which radio to use. 'lime' -> driver=lime over USB (default). "
+             "'pluto' -> driver=plutosdr (Ethernet uri below).",
+    )
+    parser.add_argument(
+        "--rf-args",
+        default=None,
+        help="override the full SoapySDR args given to pdsch_ue -a, e.g. "
+             "'driver=lime,antenna=LNAW'. Overrides --sdr and --pluto-uri.",
+    )
     parser.add_argument(
         "--pluto-uri",
         default="ip:10.1.2.11",
-        help="SoapySDR uri for the Pluto, e.g. ip:10.1.2.11 (Ethernet) or usb: . "
-             "Pass an empty string to let Soapy auto-pick (may use USB).",
+        help="only used with --sdr pluto: SoapySDR uri, e.g. ip:10.1.2.11 (Ethernet) or usb: . "
+             "Empty string lets Soapy auto-pick.",
     )
     parser.add_argument(
         "--cell-id",
@@ -366,9 +379,14 @@ def main(argv=None):
     if not os.path.isfile(_PDSCH) or not os.access(_PDSCH, os.X_OK):
         sys.exit("pdsch_ue was not found at %s" % _PDSCH)
 
-    rf_args = "driver=plutosdr"
-    if args.pluto_uri:
-        rf_args += ",uri=%s" % args.pluto_uri
+    if args.rf_args:
+        rf_args = args.rf_args
+    elif args.sdr == "lime":
+        rf_args = "driver=lime"
+    else:
+        rf_args = "driver=plutosdr"
+        if args.pluto_uri:
+            rf_args += ",uri=%s" % args.pluto_uri
 
     say("%d Hz  EARFCN %d" % (hz, args.earfcn))
     say("radio: %s" % rf_args)
