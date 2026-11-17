@@ -45,6 +45,9 @@ from lte_sync import CP, FFT_SIZE, FS, SYMBOL, pss_time, sss_freq
 NFFT = FFT_SIZE
 PBCH_BITS = 1920
 FRAME_PHASES = 4
+# PBCH occasions to soft-combine. A longer capture (more --seconds) supplies
+# more, which pulls a marginal MIB over the exact-CRC line.
+MAX_MIB_FRAMES = 200
 # 10 MHz first. That is the office Band 20 carrier, and a miss still tries the rest.
 BANDWIDTHS = (50, 25, 100, 75, 15, 6)
 _GOLD = {}
@@ -834,7 +837,7 @@ def _decode_mib_native(samples, sample_rate: float, pci: int):
     reference = _pss_freq(int(pci) % 3)
     grouped = []
     cursor = start
-    for _ in range(12):
+    for _ in range(MAX_MIB_FRAMES):
         if cursor + frame > len(samples) and cursor + pss_at + nfft > len(samples):
             break
         guess = cursor + pss_at
@@ -902,8 +905,8 @@ def decode_cell_identity(samples, pci: int, cfo_hz: float = 0.0, sample_rate: fl
             if cursor >= 0:
                 frames.append(cursor)
             cursor += 19200
-        # 120 ms is 12 frames: three repeats of the 40 ms PBCH word.
-        frames = frames[:12]
+        # Each 40 ms PBCH word repeats; more frames soft-combine for a weak cell.
+        frames = frames[:MAX_MIB_FRAMES]
         nid2 = int(pci) % 3
         pss_in_subframe = symbol_useful_offset(6)
         grouped = []
