@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""Read the cells on an EARFCN and follow their neighbour lists.
+"""Read the cells on an EARFCN, follow their neighbour lists, and survey bands.
 
 This file does not decode. It starts the Pluto pdsch_ue once per sync group
-(the last digit of the physical cell ID modulo 3), reads the strongest cell
-in each group, and then keeps the reader running long enough to also catch
-that cell's SIB4 and SIB5 neighbour lists:
+(the last digit of the physical cell ID modulo 3), reads the strongest cell in
+each group, and keeps the reader running long enough to also catch that cell's
+SIB4/SIB5 neighbour lists:
 
   SIB4  physical cell IDs of other cells on the SAME frequency (co-channel)
   SIB5  the OTHER EARFCNs this cell lists as neighbours, and their PCIs
 
-The SIB5 EARFCNs are the operator's local channel plan. By default the
-scanner follows them: it queues each new neighbour frequency and scans it
-too, so one seed EARFCN crawls outward across the whole local deployment.
-Use --no-crawl to scan only the seed frequency.
+By default it follows the SIB5 neighbour frequencies (crawl). --sweep seeds the
+crawl from a built-in UK band plan instead of a single channel. --fast trims the
+timers for a quick Cell-ID-only sweep. --log writes each cell found to a file.
+
+Pluto limits: one RX, 20 MHz, omni. pdsch_ue returns the STRONGEST cell per
+sync group, so a channel yields at most three Cell IDs; weaker co-channel cells
+are heard (reported as present) but not decoded. More Cell IDs come from
+scanning more channels (crawl / --sweep), not from one frequency.
 """
 
 from __future__ import annotations
@@ -40,6 +44,19 @@ _BANDS = (
     (40, 23000, 38650, 38650, 39649),
 )
 
+# UK downlink EARFCNs across the supported bands, to seed a --sweep. The crawl
+# expands this with whatever SIB5 neighbours are discovered.
+_SWEEP_PLAN = (
+    6200, 6300, 6400,              # Band 20  800 MHz
+    3500, 3625, 3750,              # Band 8   900 MHz
+    1300, 1500, 1617, 1801, 1900,  # Band 3   1800 MHz
+    99, 275, 399, 525,             # Band 1   2100 MHz
+    2850, 3100, 3350,              # Band 7   2600 MHz
+    9310, 9485,                    # Band 28  700 MHz
+    38100,                         # Band 38  2600 TDD
+    38750, 39150,                  # Band 40  2300 TDD
+)
+
 _PDSCH = "/home/revector/srsRAN_4G/build/lib/examples/pdsch_ue"
 _IDENTITY = re.compile(
     r"SIB1 cell identity (\d+)\s+eNB (\d+)\s+sector (\d+)\s+TAC (\d+)\s+PLMN ([\d-]+)"
@@ -51,8 +68,6 @@ _PCI = re.compile(r"\*?Found Cell_id:\s+(\d+)\s+(FDD|TDD).*PSR=([0-9.]+)")
 _MIB = re.compile(r"Decoded MIB")
 _RATE = re.compile(r"Setting rx sampling rate ([0-9.]+) MHz")
 _MISS = re.compile(r"Could not find any cell")
-
-FIND_SECONDS = 20  # time to find a tower before giving up on a frequency
 
 
 def downlink_hz(earfcn):
@@ -72,6 +87,16 @@ def say(text):
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S  ") + text, flush=True)
 
 
+def log_cell(path, text):
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S  ") + text + "\n")
+    except OSError as exc:
+        say("could not write log %s: %s" % (path, exc))
+
+
 def take_lines(pending, chunk):
     """Split a byte stream on newlines. Return complete text lines and the remainder."""
     pending += chunk.replace(b"\r", b"\n")
@@ -85,11 +110,13 @@ def take_lines(pending, chunk):
     return lines, pending
 
 
-def read_group(earfcn, hz, gain, group, known, dwell):
-    """Read one sync group. Return {cell_id, pci, neigh_earfcns, neigh_pcis}.
+def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
+    """Read one sync group. Return {cell_id, pci, line, neigh_earfcns, scheduled}.
 
-    When a cell is found the reader is kept running for `dwell` seconds so the
-    SIB4/SIB5 neighbour lists (sent in later SI windows than SIB1) are caught.
+    find_seconds is how long to hunt for a tower before giving up. Once a cell is
+    found the reader is kept for `dwell` seconds so the SIB4/SIB5 neighbour lists
+    (sent in later SI windows than SIB1) are caught. dwell can be small for a
+    Cell-ID-only sweep.
     """
     say("group %d  listening" % group)
     command = [
@@ -113,12 +140,13 @@ def read_group(earfcn, hz, gain, group, known, dwell):
     streams = [process.stdout, process.stderr]
     pending = {process.stdout: b"", process.stderr: b""}
     started = time.monotonic()
-    deadline = started + FIND_SECONDS
-    limit = started + FIND_SECONDS + dwell + 20
+    deadline = started + find_seconds
+    limit = started + find_seconds + dwell + 20
     last_note = started
     saw_pci = False
     pci_num = None
     cell_id = None
+    cell_line = None
     neigh_earfcns = set()
     neigh_pcis = set()
     scheduled = set()
@@ -151,7 +179,7 @@ def read_group(earfcn, hz, gain, group, known, dwell):
                         last_note = time.monotonic()
                         if not saw_pci:
                             deadline = min(limit, time.monotonic() + dwell)
-                            say("group %d  tower found, collecting ID + neighbours for up to %d s" % (group, dwell))
+                            say("group %d  tower found, reading for up to %d s" % (group, dwell))
                         saw_pci = True
                     if _RATE.search(text):
                         say("group %d  sample rate %s MHz" % (group, _RATE.search(text).group(1)))
@@ -174,10 +202,11 @@ def read_group(earfcn, hz, gain, group, known, dwell):
                                             pci_num = int(late.group(1))
                         cell_id = int(found.group(1))
                         pci_text = ("PCI %d  " % pci_num) if pci_num is not None else ""
-                        line = (
-                            "group %d  %s28-bit %s  (0x%07X)  eNB %s  sector %s  TAC %s  PLMN %s"
+                        cell_line = (
+                            "%.1f MHz (EARFCN %d)  %s28-bit %s  (0x%07X)  eNB %s  sector %s  TAC %s  PLMN %s"
                             % (
-                                group,
+                                hz / 1e6,
+                                earfcn,
                                 pci_text,
                                 found.group(1),
                                 cell_id,
@@ -187,10 +216,12 @@ def read_group(earfcn, hz, gain, group, known, dwell):
                                 found.group(5),
                             )
                         )
+                        shown = "group %d  %s" % (group, cell_line)
                         if known:
-                            line += "  MATCH" if cell_id in known else "  not a known cell"
-                        say(line)
-                        say("group %d  got ID, reading neighbour lists (SIB4/SIB5) for up to %d s" % (group, dwell))
+                            shown += "  MATCH" if cell_id in known else "  not a known cell"
+                        say(shown)
+                        if dwell > 0:
+                            say("group %d  got ID, reading neighbour lists for up to %d s" % (group, dwell))
                         last_note = time.monotonic()
                         saw_pci = True
                         deadline = min(limit, time.monotonic() + dwell)
@@ -214,24 +245,24 @@ def read_group(earfcn, hz, gain, group, known, dwell):
                         neigh_pcis.update(pcis)
                         say("group %d  SIB5 neighbour EARFCN %d (%s)" % (group, neighbour, mhz_label(neighbour)))
                         last_note = time.monotonic()
-            if cell_id is not None and neigh_earfcns:
-                say("group %d  got ID and neighbour frequencies, moving on" % group)
+            if cell_id is not None and (dwell == 0 or neigh_earfcns):
                 break
             if not streams:
                 break
         if cell_id is None:
             if saw_pci:
-                say("group %d  saw a cell, SIB1 did not pass" % group)
+                say("group %d  PCI %s present but SIB1 did not decode (too weak to read the ID)" % (group, pci_num))
             else:
                 say("group %d  no cell" % group)
         else:
             if 5 in scheduled and not neigh_earfcns:
-                say("group %d  cell schedules SIB5 but it did not decode - weak signal/PDCCH miss; try --gain 73 or a better antenna" % group)
+                say("group %d  cell schedules SIB5 but it did not decode - weak signal/PDCCH miss" % group)
             elif scheduled and 5 not in scheduled:
                 say("group %d  this cell broadcasts no SIB5 (no inter-frequency neighbour list)" % group)
         return {
             "cell_id": cell_id,
             "pci": pci_num,
+            "line": cell_line,
             "neigh_earfcns": neigh_earfcns,
             "neigh_pcis": neigh_pcis,
             "scheduled": scheduled,
@@ -249,60 +280,60 @@ def read_group(earfcn, hz, gain, group, known, dwell):
                 stream.close()
 
 
-def scan_channel(earfcn, gain, groups, known, dwell):
-    """Scan all requested groups on one EARFCN. Return the set of neighbour EARFCNs."""
+def scan_channel(earfcn, gain, groups, known, dwell, find_seconds):
+    """Scan all requested groups on one EARFCN.
+
+    Return (neigh_earfcns, cells, present_pcis) where cells is a list of
+    (cell_id, line) and present_pcis is every PCI heard, decoded or not.
+    """
     hz = downlink_hz(earfcn)
     if hz is None:
         say("EARFCN %d is outside the band table, skipping" % earfcn)
-        return set(), set()
+        return set(), [], set()
     say("=== EARFCN %d (%.1f MHz) ===" % (earfcn, hz / 1e6))
     neigh_earfcns = set()
-    cells = set()
+    cells = []
+    present = set()
     for group in groups:
-        result = read_group(earfcn, hz, gain, group, known, dwell)
+        result = read_group(earfcn, hz, gain, group, known, dwell, find_seconds)
+        if result["pci"] is not None:
+            present.add(result["pci"])
         if result["cell_id"] is not None:
-            cells.add(result["cell_id"])
+            cells.append((result["cell_id"], result["line"]))
         neigh_earfcns.update(result["neigh_earfcns"])
-    return neigh_earfcns, cells
+    decoded = {cid for cid, _line in cells}
+    if present:
+        say(
+            "EARFCN %d summary: %d cell(s) heard (PCI %s), %d Cell ID(s) decoded"
+            % (earfcn, len(present), " ".join(str(p) for p in sorted(present)), len(decoded))
+        )
+    return neigh_earfcns, cells, present
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Read the cells on an EARFCN and follow their SIB5 neighbour frequencies."
+        description="Read cells on an EARFCN, follow SIB5 neighbours, or sweep a band plan."
     )
-    parser.add_argument("--earfcn", type=int, required=True, help="seed LTE downlink channel number")
+    seed = parser.add_mutually_exclusive_group(required=True)
+    seed.add_argument("--earfcn", type=int, help="seed LTE downlink channel number")
+    seed.add_argument("--sweep", action="store_true", help="seed from the built-in UK band plan")
     parser.add_argument("--gain", type=float, default=70.0, help="Pluto gain passed to pdsch_ue")
     parser.add_argument(
         "--cell-id",
         type=int,
         action="append",
         default=[],
-        help="known 28-bit cell identity. Repeat for more than one. A match is marked MATCH",
+        help="known 28-bit cell identity. Repeat for more. A match is marked MATCH",
     )
-    parser.add_argument(
-        "--group",
-        type=int,
-        nargs="+",
-        default=[0, 1, 2],
-        help="which groups to search. Example: --group 0 1   or   --group 2",
-    )
-    parser.add_argument(
-        "--dwell",
-        type=int,
-        default=30,
-        help="seconds to keep reading a found cell for its ID and SIB4/SIB5 neighbours",
-    )
-    parser.add_argument(
-        "--no-crawl",
-        action="store_true",
-        help="scan only --earfcn; do not follow SIB5 neighbour frequencies",
-    )
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="stop after one full crawl instead of looping forever",
-    )
+    parser.add_argument("--group", type=int, nargs="+", default=[0, 1, 2], help="sync groups to search")
+    parser.add_argument("--find", type=int, default=None, help="seconds to hunt for a tower (default 20, fast 10)")
+    parser.add_argument("--dwell", type=int, default=None, help="seconds to read a found cell for SIB4/SIB5 (default 30, fast 8)")
+    parser.add_argument("--fast", action="store_true", help="quick Cell-ID sweep: short find, short dwell, no crawl")
+    parser.add_argument("--no-crawl", action="store_true", help="do not follow SIB5 neighbour frequencies")
+    parser.add_argument("--once", action="store_true", help="stop after one full crawl/sweep instead of looping")
+    parser.add_argument("--log", help="append every Cell ID found to this file")
     args = parser.parse_args(argv)
+
     groups = []
     for group in args.group:
         if group not in (0, 1, 2):
@@ -310,34 +341,48 @@ def main(argv=None):
         if group not in groups:
             groups.append(group)
 
-    hz = downlink_hz(args.earfcn)
-    if hz is None:
-        sys.exit("EARFCN %d is outside the band table in this launcher." % args.earfcn)
+    find_seconds = args.find if args.find is not None else (10 if args.fast else 20)
+    dwell = args.dwell if args.dwell is not None else (8 if args.fast else 30)
+    crawl = (not args.no_crawl) and (not args.fast)
+
     if not os.path.isfile(_PDSCH) or not os.access(_PDSCH, os.X_OK):
         sys.exit("pdsch_ue was not found at %s" % _PDSCH)
 
-    say("seed EARFCN %d (%.1f MHz)" % (args.earfcn, hz / 1e6))
+    if args.sweep:
+        seeds = [e for e in _SWEEP_PLAN if downlink_hz(e) is not None]
+        say("sweep: %d seed channels from the UK band plan" % len(seeds))
+    else:
+        if downlink_hz(args.earfcn) is None:
+            sys.exit("EARFCN %d is outside the band table in this launcher." % args.earfcn)
+        seeds = [args.earfcn]
+        say("seed EARFCN %d (%s)" % (args.earfcn, mhz_label(args.earfcn)))
+
     say(
-        "groups %s; dwell %d s; crawl %s. Ctrl+C stops."
-        % (" ".join(str(g) for g in groups), args.dwell, "off" if args.no_crawl else "on")
+        "groups %s; find %d s; dwell %d s; crawl %s. Ctrl+C stops."
+        % (" ".join(str(g) for g in groups), find_seconds, dwell, "off" if not crawl else "on")
     )
     if args.cell_id:
         say("known cells: %s" % ", ".join(str(cell) for cell in args.cell_id))
+    if args.log:
+        say("logging Cell IDs to %s" % args.log)
     known = set(args.cell_id)
 
     found_cells = set()
     try:
         while True:
-            queue = [args.earfcn]
+            queue = list(seeds)
             scanned = set()
             while queue:
                 earfcn = queue.pop(0)
                 if earfcn in scanned:
                     continue
                 scanned.add(earfcn)
-                neigh_earfcns, cells = scan_channel(earfcn, args.gain, groups, known, args.dwell)
-                found_cells.update(cells)
-                if not args.no_crawl:
+                neigh_earfcns, cells, _present = scan_channel(earfcn, args.gain, groups, known, dwell, find_seconds)
+                for cell_id, line in cells:
+                    if cell_id not in found_cells:
+                        found_cells.add(cell_id)
+                        log_cell(args.log, line)
+                if crawl:
                     for neighbour in sorted(neigh_earfcns):
                         if neighbour in scanned or neighbour in queue:
                             continue
@@ -346,16 +391,13 @@ def main(argv=None):
                             say("  queued neighbour EARFCN %d (%s)" % (neighbour, mhz_label(neighbour)))
                         else:
                             say("  neighbour EARFCN %d is %s (not queued)" % (neighbour, mhz_label(neighbour)))
-                say(
-                    "EARFCN %d done: %d cells total, %d channels queued"
-                    % (earfcn, len(found_cells), len(queue))
-                )
-            say("crawl pass complete: %d unique cells across %d channels" % (len(found_cells), len(scanned)))
+                say("done %s: %d cells total, %d channels queued" % (earfcn, len(found_cells), len(queue)))
+            say("pass complete: %d unique cells across %d channels" % (len(found_cells), len(scanned)))
             if found_cells:
                 say("cells found: %s" % ", ".join(str(cell) for cell in sorted(found_cells)))
             if args.once:
                 break
-            say("looping the crawl again (Ctrl+C to stop)")
+            say("looping again (Ctrl+C to stop)")
     except KeyboardInterrupt:
         say("stopped: %d unique cells found" % len(found_cells))
         return 0
