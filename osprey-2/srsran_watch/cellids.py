@@ -86,6 +86,10 @@ _TRIAGE = False
 _TRIAGE_THRESHOLD = 6.0
 _TRIAGE_WARNED = False
 
+# When --log is given, every printed line is also appended here, so the file
+# is the complete run log, not just the decoded Cell IDs.
+_LOG = None
+
 
 def _soapy_device():
     """The -a device string for pdsch_ue, e.g. 'driver=lime,rxant=LNAL'."""
@@ -143,17 +147,14 @@ def mhz_label(earfcn):
 
 
 def say(text):
-    print(datetime.now().strftime("%Y-%m-%d %H:%M:%S  ") + text, flush=True)
-
-
-def log_cell(path, text):
-    if not path:
-        return
-    try:
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S  ") + text + "\n")
-    except OSError as exc:
-        say("could not write log %s: %s" % (path, exc))
+    line = datetime.now().strftime("%Y-%m-%d %H:%M:%S  ") + text
+    print(line, flush=True)
+    if _LOG:
+        try:
+            with open(_LOG, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            pass
 
 
 # UK operator names by MNC (MCC 234/235). Used to label the final report.
@@ -176,29 +177,24 @@ def operator_label(line):
     return ""
 
 
-def final_report(found_cells, log_path):
-    """Print (and log) every decoded Cell ID with its full details at the end.
+def final_report(found_cells):
+    """Print every decoded Cell ID with its full details at the end.
 
-    found_cells maps a 28-bit cell id to its decoded detail line.
+    found_cells maps a 28-bit cell id to its decoded detail line. say() also
+    writes each line to the --log file, so the report lands there too.
     """
-    header = "===== FINAL REPORT: %d unique Cell ID(s) decoded =====" % len(found_cells)
-    say(header)
-    log_cell(log_path, header)
+    say("===== FINAL REPORT: %d unique Cell ID(s) decoded =====" % len(found_cells))
     if not found_cells:
         say("  (no Cell IDs were decoded this run)")
         return
     for cell_id in sorted(found_cells):
         line = found_cells[cell_id]
         operator = operator_label(line)
-        text = "  " + line + (("  [%s]" % operator) if operator else "")
-        say(text)
-        log_cell(log_path, text.strip())
-    footer = "===== %d Cell ID(s): %s =====" % (
+        say("  " + line + (("  [%s]" % operator) if operator else ""))
+    say("===== %d Cell ID(s): %s =====" % (
         len(found_cells),
         ", ".join(str(c) for c in sorted(found_cells)),
-    )
-    say(footer)
-    log_cell(log_path, footer)
+    ))
 
 
 def take_lines(pending, chunk):
@@ -470,11 +466,12 @@ def main(argv=None):
     parser.add_argument("--log", help="append every Cell ID found to this file")
     args = parser.parse_args(argv)
 
-    global _DRIVER, _DEVICE_ARGS, _TRIAGE, _TRIAGE_THRESHOLD
+    global _DRIVER, _DEVICE_ARGS, _TRIAGE, _TRIAGE_THRESHOLD, _LOG
     _DRIVER = args.driver
     _DEVICE_ARGS = args.device_args or ""
     _TRIAGE = args.triage
     _TRIAGE_THRESHOLD = args.triage_threshold
+    _LOG = args.log
     say("radio: driver=%s%s" % (_DRIVER, (" " + _DEVICE_ARGS) if _DEVICE_ARGS else ""))
     if _TRIAGE:
         if _TRIAGE_THRESHOLD <= 0:
@@ -520,7 +517,7 @@ def main(argv=None):
     if args.cell_id:
         say("known cells: %s" % ", ".join(str(cell) for cell in args.cell_id))
     if args.log:
-        say("logging Cell IDs to %s" % args.log)
+        say("logging the full run to %s" % args.log)
     known = set(args.cell_id)
 
     found_cells = {}
@@ -537,7 +534,6 @@ def main(argv=None):
                 for cell_id, line in cells:
                     if cell_id not in found_cells:
                         found_cells[cell_id] = line
-                        log_cell(args.log, line)
                 if crawl:
                     for neighbour in sorted(neigh_earfcns):
                         if neighbour in scanned or neighbour in queue:
@@ -556,9 +552,9 @@ def main(argv=None):
             say("looping again (Ctrl+C to stop)")
     except KeyboardInterrupt:
         say("stopped: %d unique cells found" % len(found_cells))
-        final_report(found_cells, args.log)
+        final_report(found_cells)
         return 0
-    final_report(found_cells, args.log)
+    final_report(found_cells)
     return 0
 
 
