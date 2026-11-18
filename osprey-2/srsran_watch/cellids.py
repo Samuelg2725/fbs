@@ -113,7 +113,7 @@ def read_group(earfcn, hz, gain, group, known, dwell):
     pending = {process.stdout: b"", process.stderr: b""}
     started = time.monotonic()
     deadline = started + FIND_SECONDS
-    limit = started + FIND_SECONDS + dwell + 10
+    limit = started + FIND_SECONDS + dwell + 20
     last_note = started
     saw_pci = False
     pci_num = None
@@ -156,6 +156,8 @@ def read_group(earfcn, hz, gain, group, known, dwell):
                     if _MIB.search(text):
                         say("group %d  MIB decoded, reading SIBs" % group)
                         last_note = time.monotonic()
+                        saw_pci = True
+                        deadline = min(limit, time.monotonic() + dwell)
                     found = _IDENTITY.search(text)
                     if found and cell_id is None:
                         if pci_num is None and process.stdout in streams:
@@ -186,7 +188,10 @@ def read_group(earfcn, hz, gain, group, known, dwell):
                         if known:
                             line += "  MATCH" if cell_id in known else "  not a known cell"
                         say(line)
+                        say("group %d  got ID, reading neighbour lists (SIB4/SIB5) for up to %d s" % (group, dwell))
                         last_note = time.monotonic()
+                        saw_pci = True
+                        deadline = min(limit, time.monotonic() + dwell)
                     sib4 = _SIB4.search(text)
                     if sib4:
                         pcis = [int(x) for x in sib4.group(1).split() if x.isdigit()]
@@ -202,6 +207,9 @@ def read_group(earfcn, hz, gain, group, known, dwell):
                         neigh_pcis.update(pcis)
                         say("group %d  SIB5 neighbour EARFCN %d (%s)" % (group, neighbour, mhz_label(neighbour)))
                         last_note = time.monotonic()
+            if cell_id is not None and neigh_earfcns:
+                say("group %d  got ID and neighbour frequencies, moving on" % group)
+                break
             if not streams:
                 break
         if cell_id is None:
@@ -263,7 +271,7 @@ def main(argv=None):
     parser.add_argument(
         "--dwell",
         type=int,
-        default=25,
+        default=30,
         help="seconds to keep reading a found cell for its ID and SIB4/SIB5 neighbours",
     )
     parser.add_argument(
