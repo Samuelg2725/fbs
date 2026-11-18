@@ -127,7 +127,7 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
         "stdbuf", "-oL", "-eL",
         _PDSCH,
         "-I", "soapy",
-        "-a", "driver=plutosdr",
+        "-a", "driver=lime",
         "-f", str(hz),
         "-g", str(gain),
         "-Q",
@@ -346,7 +346,7 @@ def main(argv=None):
     seed = parser.add_mutually_exclusive_group(required=True)
     seed.add_argument("--earfcn", type=int, help="seed LTE downlink channel number")
     seed.add_argument("--sweep", action="store_true", help="seed from the built-in UK band plan")
-    parser.add_argument("--gain", type=float, default=70.0, help="Pluto gain passed to pdsch_ue")
+    parser.add_argument("--gain", type=float, default=70.0, help="front-end gain passed to pdsch_ue")
     parser.add_argument(
         "--cell-id",
         type=int,

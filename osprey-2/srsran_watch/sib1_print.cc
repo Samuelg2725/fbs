@@ -176,3 +176,13 @@ extern "C" void srsran_sib1_print(const uint8_t* payload, uint32_t nbits)
     sched_done = 1;
   }
 }
+
+/* Helpers pdsch_ue.c references that the current srsRAN build config leaves
+   uncompiled (their definitions are guarded out). They are no-ops irrelevant
+   to receive-only cell scanning: srsran_debug_handle_crash installs a crash
+   backtrace handler, generate_mcch_table builds an MBMS schedule table. These
+   stubs let the example link. */
+extern "C" {
+  void srsran_debug_handle_crash(int argc, char** argv) { (void)argc; (void)argv; }
+  void generate_mcch_table(void* mch_table, unsigned mbsfn_alloc) { (void)mch_table; (void)mbsfn_alloc; }
+}
