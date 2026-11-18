@@ -79,6 +79,13 @@ _MISS = re.compile(r"Could not find any cell")
 _DRIVER = "plutosdr"
 _DEVICE_ARGS = ""
 
+# Optional fast PSS triage (--triage). Off by default: with it off the scanner
+# behaves exactly as before. _TRIAGE_THRESHOLD <= 0 means "measure only, never
+# skip" (calibration). _TRIAGE_WARNED keeps the fallback warning to one line.
+_TRIAGE = False
+_TRIAGE_THRESHOLD = 6.0
+_TRIAGE_WARNED = False
+
 
 def _soapy_device():
     """The -a device string for pdsch_ue, e.g. 'driver=lime,rxant=LNAL'."""
@@ -86,6 +93,40 @@ def _soapy_device():
     if _DEVICE_ARGS:
         spec += "," + _DEVICE_ARGS.strip().lstrip(",")
     return spec
+
+
+def _triage_channel(hz, gain, earfcn):
+    """Fast PSS presence gate before the slow srsRAN scan.
+
+    Returns False only to SKIP a channel that is confidently empty. Returns
+    True when a cell is likely present, or when triage could not run (import
+    or capture failure) -- in that case the caller does a full scan, so a
+    failure never costs a cell. With a threshold <= 0 it measures and prints
+    the ratio but never skips (use it to calibrate the threshold).
+    """
+    global _TRIAGE_WARNED
+    try:
+        import pss_triage  # noqa: PLC0415  (sits next to this script)
+    except Exception as exc:
+        if not _TRIAGE_WARNED:
+            say("triage unavailable (%s) - running full scans" % exc)
+            _TRIAGE_WARNED = True
+        return True
+    try:
+        is_present, ratio = pss_triage.present(_soapy_device(), hz, gain, _TRIAGE_THRESHOLD)
+    except Exception as exc:
+        if not _TRIAGE_WARNED:
+            say("triage capture failed (%s) - running full scans" % exc)
+            _TRIAGE_WARNED = True
+        return True
+    if _TRIAGE_THRESHOLD <= 0:
+        say("EARFCN %d  triage: PSS ratio %.1f (measure only, not skipping)" % (earfcn, ratio))
+        return True
+    if is_present:
+        say("EARFCN %d  triage: PSS ratio %.1f >= %.1f, scanning" % (earfcn, ratio, _TRIAGE_THRESHOLD))
+        return True
+    say("EARFCN %d  triage: PSS ratio %.1f < %.1f, skipping (empty)" % (earfcn, ratio, _TRIAGE_THRESHOLD))
+    return False
 
 
 def downlink_hz(earfcn):
@@ -361,6 +402,8 @@ def scan_channel(earfcn, gain, groups, known, dwell, find_seconds, single):
         say("EARFCN %d is outside the band table, skipping" % earfcn)
         return set(), [], set()
     say("=== EARFCN %d (%.1f MHz) ===" % (earfcn, hz / 1e6))
+    if _TRIAGE and not _triage_channel(hz, gain, earfcn):
+        return set(), [], set()
     neigh_earfcns = set()
     cells = []
     present = set()
@@ -409,6 +452,8 @@ def main(argv=None):
     parser.add_argument("--gain", type=float, default=70.0, help="RX gain passed to pdsch_ue")
     parser.add_argument("--driver", default="plutosdr", help="SoapySDR driver: plutosdr (default) or lime")
     parser.add_argument("--device-args", default="", help="extra Soapy device args, comma-separated, e.g. 'rxant=LNAL' to force the Lime low-band port")
+    parser.add_argument("--triage", action="store_true", help="fast PSS check before each channel; skip channels with no cell (faster sweeps, off by default)")
+    parser.add_argument("--triage-threshold", type=float, default=6.0, help="PSS peak/RMS ratio to count a channel as occupied (default 6.0); 0 = measure and print only, never skip (for calibration)")
     parser.add_argument(
         "--cell-id",
         type=int,
@@ -425,10 +470,17 @@ def main(argv=None):
     parser.add_argument("--log", help="append every Cell ID found to this file")
     args = parser.parse_args(argv)
 
-    global _DRIVER, _DEVICE_ARGS
+    global _DRIVER, _DEVICE_ARGS, _TRIAGE, _TRIAGE_THRESHOLD
     _DRIVER = args.driver
     _DEVICE_ARGS = args.device_args or ""
+    _TRIAGE = args.triage
+    _TRIAGE_THRESHOLD = args.triage_threshold
     say("radio: driver=%s%s" % (_DRIVER, (" " + _DEVICE_ARGS) if _DEVICE_ARGS else ""))
+    if _TRIAGE:
+        if _TRIAGE_THRESHOLD <= 0:
+            say("triage: PSS measure-only (never skips) - calibration run")
+        else:
+            say("triage: fast PSS gate on, skip below ratio %.1f" % _TRIAGE_THRESHOLD)
 
     groups = []
     for group in args.group:
