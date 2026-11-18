@@ -72,6 +72,21 @@ _MIB = re.compile(r"Decoded MIB")
 _RATE = re.compile(r"Setting rx sampling rate ([0-9.]+) MHz")
 _MISS = re.compile(r"Could not find any cell")
 
+# SoapySDR radio selection. Overridden from the command line in main(). The
+# Pluto is the default; --driver lime switches pdsch_ue to a LimeSDR. Extra
+# device args (e.g. rxant=LNAL to force the low-band port) append after the
+# driver, comma separated.
+_DRIVER = "plutosdr"
+_DEVICE_ARGS = ""
+
+
+def _soapy_device():
+    """The -a device string for pdsch_ue, e.g. 'driver=lime,rxant=LNAL'."""
+    spec = "driver=%s" % _DRIVER
+    if _DEVICE_ARGS:
+        spec += "," + _DEVICE_ARGS.strip().lstrip(",")
+    return spec
+
 
 def downlink_hz(earfcn):
     """Hz of one downlink EARFCN, or None when the table above does not cover it."""
@@ -127,7 +142,7 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
         "stdbuf", "-oL", "-eL",
         _PDSCH,
         "-I", "soapy",
-        "-a", "driver=plutosdr",
+        "-a", _soapy_device(),
         "-f", str(hz),
         "-g", str(gain),
         "-Q",
@@ -346,7 +361,9 @@ def main(argv=None):
     seed = parser.add_mutually_exclusive_group(required=True)
     seed.add_argument("--earfcn", type=int, help="seed LTE downlink channel number")
     seed.add_argument("--sweep", action="store_true", help="seed from the built-in UK band plan")
-    parser.add_argument("--gain", type=float, default=70.0, help="Pluto gain passed to pdsch_ue")
+    parser.add_argument("--gain", type=float, default=70.0, help="RX gain passed to pdsch_ue")
+    parser.add_argument("--driver", default="plutosdr", help="SoapySDR driver: plutosdr (default) or lime")
+    parser.add_argument("--device-args", default="", help="extra Soapy device args, comma-separated, e.g. 'rxant=LNAL' to force the Lime low-band port")
     parser.add_argument(
         "--cell-id",
         type=int,
@@ -362,6 +379,11 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true", help="stop after one full crawl/sweep instead of looping")
     parser.add_argument("--log", help="append every Cell ID found to this file")
     args = parser.parse_args(argv)
+
+    global _DRIVER, _DEVICE_ARGS
+    _DRIVER = args.driver
+    _DEVICE_ARGS = args.device_args or ""
+    say("radio: driver=%s%s" % (_DRIVER, (" " + _DEVICE_ARGS) if _DEVICE_ARGS else ""))
 
     groups = []
     for group in args.group:
