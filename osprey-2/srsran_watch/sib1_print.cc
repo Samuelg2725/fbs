@@ -154,25 +154,4 @@ extern "C" void srsran_sib1_print(const uint8_t* payload, uint32_t nbits)
     used += wrote;
   }
   save_line(line);
-
-  /* The schedule lists which SIBs this cell actually broadcasts. SIB2 is always
-   * in the first SI message; sib_map_info lists SIB3 and up. This tells us
-   * whether SIB4/SIB5 are even on air before we wait for them. */
-  static int sched_done = 0;
-  if (!sched_done) {
-    char sched[256];
-    int  s_used = snprintf(sched, sizeof(sched), "SIB1 schedules SIB2");
-    for (uint32_t si = 0; si < sib1.sched_info_list.size() && s_used > 0 && (uint32_t)s_used < sizeof(sched); si++) {
-      const asn1::rrc::sched_info_s& info = sib1.sched_info_list[si];
-      for (uint32_t m = 0; m < info.sib_map_info.size() && s_used > 0 && (uint32_t)s_used < sizeof(sched); m++) {
-        int wrote2 = snprintf(sched + s_used, sizeof(sched) - (uint32_t)s_used, " SIB%d", (int)info.sib_map_info[m].to_number());
-        if (wrote2 < 0) {
-          break;
-        }
-        s_used += wrote2;
-      }
-    }
-    save_line(sched);
-    sched_done = 1;
-  }
 }
