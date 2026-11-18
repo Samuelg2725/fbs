@@ -314,8 +314,15 @@ def scan_channel(earfcn, gain, groups, known, dwell, find_seconds, single):
         if triage["pci"] is not None:
             present.add(triage["pci"])
         neigh_earfcns.update(triage["neigh_earfcns"])
-        say("EARFCN %d  cell present, decoding all sync groups" % earfcn)
-        runs = list(groups)
+        skip_group = None
+        if triage["cell_id"] is not None:
+            cells.append((triage["cell_id"], triage["line"]))
+            if triage["pci"] is not None:
+                skip_group = triage["pci"] % 3
+            say("EARFCN %d  strongest cell decoded; checking the other sync groups" % earfcn)
+        else:
+            say("EARFCN %d  cell present, decoding all sync groups" % earfcn)
+        runs = [g for g in groups if g != skip_group]
     for group in runs:
         result = read_group(earfcn, hz, gain, group, known, dwell, find_seconds)
         if result["pci"] is not None:
