@@ -46,6 +46,7 @@ _IDENTITY = re.compile(
 )
 _SIB4 = re.compile(r"SIB4 intra-freq neighbours\s+([\d ]+)")
 _SIB5 = re.compile(r"SIB5 inter-freq EARFCN (\d+)(?:\s+PCI\s+([\d ]+))?")
+_SCHED = re.compile(r"SIB1 schedules ((?:SIB\d+\s*)+)")
 _PCI = re.compile(r"\*?Found Cell_id:\s+(\d+)\s+(FDD|TDD).*PSR=([0-9.]+)")
 _MIB = re.compile(r"Decoded MIB")
 _RATE = re.compile(r"Setting rx sampling rate ([0-9.]+) MHz")
@@ -120,6 +121,7 @@ def read_group(earfcn, hz, gain, group, known, dwell):
     cell_id = None
     neigh_earfcns = set()
     neigh_pcis = set()
+    scheduled = set()
     try:
         while time.monotonic() < deadline:
             if time.monotonic() - last_note >= 5:
@@ -192,6 +194,11 @@ def read_group(earfcn, hz, gain, group, known, dwell):
                         last_note = time.monotonic()
                         saw_pci = True
                         deadline = min(limit, time.monotonic() + dwell)
+                    sched = _SCHED.search(text)
+                    if sched and not scheduled:
+                        scheduled = set(int(x) for x in re.findall(r"SIB(\d+)", sched.group(1)))
+                        say("group %d  SIB1 schedule: %s" % (group, " ".join("SIB%d" % s for s in sorted(scheduled))))
+                        last_note = time.monotonic()
                     sib4 = _SIB4.search(text)
                     if sib4:
                         pcis = [int(x) for x in sib4.group(1).split() if x.isdigit()]
@@ -217,7 +224,18 @@ def read_group(earfcn, hz, gain, group, known, dwell):
                 say("group %d  saw a cell, SIB1 did not pass" % group)
             else:
                 say("group %d  no cell" % group)
-        return {"cell_id": cell_id, "pci": pci_num, "neigh_earfcns": neigh_earfcns, "neigh_pcis": neigh_pcis}
+        else:
+            if 5 in scheduled and not neigh_earfcns:
+                say("group %d  cell schedules SIB5 but it did not decode - weak signal/PDCCH miss; try --gain 73 or a better antenna" % group)
+            elif scheduled and 5 not in scheduled:
+                say("group %d  this cell broadcasts no SIB5 (no inter-frequency neighbour list)" % group)
+        return {
+            "cell_id": cell_id,
+            "pci": pci_num,
+            "neigh_earfcns": neigh_earfcns,
+            "neigh_pcis": neigh_pcis,
+            "scheduled": scheduled,
+        }
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGINT)
