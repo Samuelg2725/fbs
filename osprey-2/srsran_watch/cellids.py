@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """Read the cells on an EARFCN, follow their neighbour lists, and survey bands.
 
-This file does not decode. It starts the Pluto pdsch_ue once per sync group
-(the last digit of the physical cell ID modulo 3), reads the strongest cell in
-each group, and keeps the reader running long enough to also catch that cell's
-SIB4/SIB5 neighbour lists:
+This file does not decode. It starts the Pluto pdsch_ue, reads a cell, and keeps
+the reader running long enough to also catch that cell's SIB4/SIB5 neighbour
+lists:
 
   SIB4  physical cell IDs of other cells on the SAME frequency (co-channel)
   SIB5  the OTHER EARFCNs this cell lists as neighbours, and their PCIs
 
-By default it follows the SIB5 neighbour frequencies (crawl). --sweep seeds the
-crawl from a built-in UK band plan instead of a single channel. --fast trims the
-timers for a quick Cell-ID-only sweep. --log writes each cell found to a file.
+Two scan styles:
+  normal  one pdsch_ue per sync group (0/1/2): up to three Cell IDs per channel,
+          plus the SIB4/SIB5 crawl. Thorough but ~3 Pluto set-ups per channel.
+  --fast  one pdsch_ue per channel (no -l): locks the strongest cell only, pays
+          the Pluto set-up once. Much quicker; one Cell ID per channel, no crawl.
 
-Pluto limits: one RX, 20 MHz, omni. pdsch_ue returns the STRONGEST cell per
-sync group, so a channel yields at most three Cell IDs; weaker co-channel cells
-are heard (reported as present) but not decoded. More Cell IDs come from
-scanning more channels (crawl / --sweep), not from one frequency.
+--sweep seeds from a built-in UK band plan. --log writes each Cell ID to a file.
+
+Pluto limits: one RX, 20 MHz, omni, and ~5 s to open/calibrate per launch.
+pdsch_ue returns the STRONGEST cell it locks, so weaker co-channel cells are
+heard (reported as present) but not decoded. More Cell IDs come from scanning
+more channels (crawl / --sweep), not from one frequency.
 """
 
 from __future__ import annotations
@@ -111,14 +114,15 @@ def take_lines(pending, chunk):
 
 
 def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
-    """Read one sync group. Return {cell_id, pci, line, neigh_earfcns, scheduled}.
+    """Read one cell. group is a sync group 0/1/2, or None to lock the strongest.
 
-    find_seconds is how long to hunt for a tower before giving up. Once a cell is
-    found the reader is kept for `dwell` seconds so the SIB4/SIB5 neighbour lists
-    (sent in later SI windows than SIB1) are caught. dwell can be small for a
-    Cell-ID-only sweep.
+    find_seconds is how long to hunt for a tower before giving up (must exceed the
+    Pluto's ~5 s open/calibrate plus sync time). Once a cell is found the reader is
+    kept for `dwell` seconds so the SIB4/SIB5 neighbour lists are caught.
+    Returns {cell_id, pci, line, neigh_earfcns, neigh_pcis, scheduled}.
     """
-    say("group %d  listening" % group)
+    tag = "group %d" % group if group is not None else "scan"
+    say("%s  listening" % tag)
     command = [
         "stdbuf", "-oL", "-eL",
         _PDSCH,
@@ -129,8 +133,9 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
         "-Q",
         "-F",
         "-d",
-        "-l", str(group),
     ]
+    if group is not None:
+        command += ["-l", str(group)]
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -154,7 +159,7 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
         while time.monotonic() < deadline:
             if time.monotonic() - last_note >= 5:
                 left = int(deadline - time.monotonic())
-                say("group %d  still listening, %d s left" % (group, max(left, 0)))
+                say("%s  still listening, %d s left" % (tag, max(left, 0)))
                 last_note = time.monotonic()
             remaining = max(0, deadline - time.monotonic())
             ready, _, _ = select.select(streams, [], [], min(0.5, remaining))
@@ -175,16 +180,16 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
                     pci = _PCI.search(text)
                     if pci and float(pci.group(3)) > 0:
                         pci_num = int(pci.group(1))
-                        say("group %d  PCI %s %s  PSR %s" % (group, pci.group(1), pci.group(2), pci.group(3)))
+                        say("%s  PCI %s %s  PSR %s" % (tag, pci.group(1), pci.group(2), pci.group(3)))
                         last_note = time.monotonic()
                         if not saw_pci:
                             deadline = min(limit, time.monotonic() + dwell)
-                            say("group %d  tower found, reading for up to %d s" % (group, dwell))
+                            say("%s  tower found, reading for up to %d s" % (tag, dwell))
                         saw_pci = True
                     if _RATE.search(text):
-                        say("group %d  sample rate %s MHz" % (group, _RATE.search(text).group(1)))
+                        say("%s  sample rate %s MHz" % (tag, _RATE.search(text).group(1)))
                     if _MIB.search(text):
-                        say("group %d  MIB decoded, reading SIBs" % group)
+                        say("%s  MIB decoded, reading SIBs" % tag)
                         last_note = time.monotonic()
                         saw_pci = True
                         deadline = min(limit, time.monotonic() + dwell)
@@ -216,26 +221,26 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
                                 found.group(5),
                             )
                         )
-                        shown = "group %d  %s" % (group, cell_line)
+                        shown = "%s  %s" % (tag, cell_line)
                         if known:
                             shown += "  MATCH" if cell_id in known else "  not a known cell"
                         say(shown)
                         if dwell > 0:
-                            say("group %d  got ID, reading neighbour lists for up to %d s" % (group, dwell))
+                            say("%s  got ID, reading neighbour lists for up to %d s" % (tag, dwell))
                         last_note = time.monotonic()
                         saw_pci = True
                         deadline = min(limit, time.monotonic() + dwell)
                     sched = _SCHED.search(text)
                     if sched and not scheduled:
                         scheduled = set(int(x) for x in re.findall(r"SIB(\d+)", sched.group(1)))
-                        say("group %d  SIB1 schedule: %s" % (group, " ".join("SIB%d" % s for s in sorted(scheduled))))
+                        say("%s  SIB1 schedule: %s" % (tag, " ".join("SIB%d" % s for s in sorted(scheduled))))
                         last_note = time.monotonic()
                     sib4 = _SIB4.search(text)
                     if sib4:
                         pcis = [int(x) for x in sib4.group(1).split() if x.isdigit()]
                         if pcis:
                             neigh_pcis.update(pcis)
-                            say("group %d  SIB4 co-channel PCIs: %s" % (group, " ".join(str(p) for p in pcis)))
+                            say("%s  SIB4 co-channel PCIs: %s" % (tag, " ".join(str(p) for p in pcis)))
                             last_note = time.monotonic()
                     sib5 = _SIB5.search(text)
                     if sib5:
@@ -243,7 +248,7 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
                         neigh_earfcns.add(neighbour)
                         pcis = [int(x) for x in (sib5.group(2) or "").split() if x.isdigit()]
                         neigh_pcis.update(pcis)
-                        say("group %d  SIB5 neighbour EARFCN %d (%s)" % (group, neighbour, mhz_label(neighbour)))
+                        say("%s  SIB5 neighbour EARFCN %d (%s)" % (tag, neighbour, mhz_label(neighbour)))
                         last_note = time.monotonic()
             if cell_id is not None and (dwell == 0 or neigh_earfcns):
                 break
@@ -251,14 +256,14 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
                 break
         if cell_id is None:
             if saw_pci:
-                say("group %d  PCI %s present but SIB1 did not decode (too weak to read the ID)" % (group, pci_num))
+                say("%s  PCI %s present but SIB1 did not decode (too weak to read the ID)" % (tag, pci_num))
             else:
-                say("group %d  no cell" % group)
+                say("%s  no cell" % tag)
         else:
             if 5 in scheduled and not neigh_earfcns:
-                say("group %d  cell schedules SIB5 but it did not decode - weak signal/PDCCH miss" % group)
+                say("%s  cell schedules SIB5 but it did not decode - weak signal/PDCCH miss" % tag)
             elif scheduled and 5 not in scheduled:
-                say("group %d  this cell broadcasts no SIB5 (no inter-frequency neighbour list)" % group)
+                say("%s  this cell broadcasts no SIB5 (no inter-frequency neighbour list)" % tag)
         return {
             "cell_id": cell_id,
             "pci": pci_num,
@@ -280,8 +285,8 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
                 stream.close()
 
 
-def scan_channel(earfcn, gain, groups, known, dwell, find_seconds):
-    """Scan all requested groups on one EARFCN.
+def scan_channel(earfcn, gain, groups, known, dwell, find_seconds, single):
+    """Scan one EARFCN. single=True does one strongest-cell run; else one per group.
 
     Return (neigh_earfcns, cells, present_pcis) where cells is a list of
     (cell_id, line) and present_pcis is every PCI heard, decoded or not.
@@ -294,7 +299,8 @@ def scan_channel(earfcn, gain, groups, known, dwell, find_seconds):
     neigh_earfcns = set()
     cells = []
     present = set()
-    for group in groups:
+    runs = [None] if single else list(groups)
+    for group in runs:
         result = read_group(earfcn, hz, gain, group, known, dwell, find_seconds)
         if result["pci"] is not None:
             present.add(result["pci"])
@@ -325,10 +331,10 @@ def main(argv=None):
         default=[],
         help="known 28-bit cell identity. Repeat for more. A match is marked MATCH",
     )
-    parser.add_argument("--group", type=int, nargs="+", default=[0, 1, 2], help="sync groups to search")
-    parser.add_argument("--find", type=int, default=None, help="seconds to hunt for a tower (default 20, fast 10)")
+    parser.add_argument("--group", type=int, nargs="+", default=[0, 1, 2], help="sync groups to search (normal mode)")
+    parser.add_argument("--find", type=int, default=None, help="seconds to hunt for a tower (default 20, fast 18)")
     parser.add_argument("--dwell", type=int, default=None, help="seconds to read a found cell for SIB4/SIB5 (default 30, fast 8)")
-    parser.add_argument("--fast", action="store_true", help="quick Cell-ID sweep: short find, short dwell, no crawl")
+    parser.add_argument("--fast", action="store_true", help="one strongest-cell run per channel, short timers, no crawl")
     parser.add_argument("--no-crawl", action="store_true", help="do not follow SIB5 neighbour frequencies")
     parser.add_argument("--once", action="store_true", help="stop after one full crawl/sweep instead of looping")
     parser.add_argument("--log", help="append every Cell ID found to this file")
@@ -341,9 +347,10 @@ def main(argv=None):
         if group not in groups:
             groups.append(group)
 
-    find_seconds = args.find if args.find is not None else (10 if args.fast else 20)
+    find_seconds = args.find if args.find is not None else (18 if args.fast else 20)
     dwell = args.dwell if args.dwell is not None else (8 if args.fast else 30)
     crawl = (not args.no_crawl) and (not args.fast)
+    single = args.fast
 
     if not os.path.isfile(_PDSCH) or not os.access(_PDSCH, os.X_OK):
         sys.exit("pdsch_ue was not found at %s" % _PDSCH)
@@ -358,8 +365,13 @@ def main(argv=None):
         say("seed EARFCN %d (%s)" % (args.earfcn, mhz_label(args.earfcn)))
 
     say(
-        "groups %s; find %d s; dwell %d s; crawl %s. Ctrl+C stops."
-        % (" ".join(str(g) for g in groups), find_seconds, dwell, "off" if not crawl else "on")
+        "%s; find %d s; dwell %d s; crawl %s. Ctrl+C stops."
+        % (
+            "fast: one strongest-cell run per channel" if single else ("groups %s" % " ".join(str(g) for g in groups)),
+            find_seconds,
+            dwell,
+            "off" if not crawl else "on",
+        )
     )
     if args.cell_id:
         say("known cells: %s" % ", ".join(str(cell) for cell in args.cell_id))
@@ -377,7 +389,7 @@ def main(argv=None):
                 if earfcn in scanned:
                     continue
                 scanned.add(earfcn)
-                neigh_earfcns, cells, _present = scan_channel(earfcn, args.gain, groups, known, dwell, find_seconds)
+                neigh_earfcns, cells, _present = scan_channel(earfcn, args.gain, groups, known, dwell, find_seconds, single)
                 for cell_id, line in cells:
                     if cell_id not in found_cells:
                         found_cells.add(cell_id)
