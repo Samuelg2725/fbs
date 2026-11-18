@@ -115,6 +115,51 @@ def log_cell(path, text):
         say("could not write log %s: %s" % (path, exc))
 
 
+# UK operator names by MNC (MCC 234/235). Used to label the final report.
+_UK_MNC = {
+    "02": "O2", "10": "O2", "11": "O2",
+    "15": "Vodafone",
+    "20": "Three", "25": "Three",
+    "30": "EE", "33": "EE", "34": "EE",
+}
+
+
+def operator_label(line):
+    """Operator name parsed from a decoded cell line's PLMN, or '' if unknown."""
+    match = re.search(r"PLMN\s+(\d+)-(\d+)", line or "")
+    if not match:
+        return ""
+    mcc, mnc = match.group(1), match.group(2)
+    if mcc in ("234", "235"):
+        return _UK_MNC.get(mnc) or _UK_MNC.get(mnc.zfill(2)) or ""
+    return ""
+
+
+def final_report(found_cells, log_path):
+    """Print (and log) every decoded Cell ID with its full details at the end.
+
+    found_cells maps a 28-bit cell id to its decoded detail line.
+    """
+    header = "===== FINAL REPORT: %d unique Cell ID(s) decoded =====" % len(found_cells)
+    say(header)
+    log_cell(log_path, header)
+    if not found_cells:
+        say("  (no Cell IDs were decoded this run)")
+        return
+    for cell_id in sorted(found_cells):
+        line = found_cells[cell_id]
+        operator = operator_label(line)
+        text = "  " + line + (("  [%s]" % operator) if operator else "")
+        say(text)
+        log_cell(log_path, text.strip())
+    footer = "===== %d Cell ID(s): %s =====" % (
+        len(found_cells),
+        ", ".join(str(c) for c in sorted(found_cells)),
+    )
+    say(footer)
+    log_cell(log_path, footer)
+
+
 def take_lines(pending, chunk):
     """Split a byte stream on newlines. Return complete text lines and the remainder."""
     pending += chunk.replace(b"\r", b"\n")
@@ -426,7 +471,7 @@ def main(argv=None):
         say("logging Cell IDs to %s" % args.log)
     known = set(args.cell_id)
 
-    found_cells = set()
+    found_cells = {}
     try:
         while True:
             queue = list(seeds)
@@ -439,7 +484,7 @@ def main(argv=None):
                 neigh_earfcns, cells, _present = scan_channel(earfcn, args.gain, groups, known, dwell, find_seconds, single)
                 for cell_id, line in cells:
                     if cell_id not in found_cells:
-                        found_cells.add(cell_id)
+                        found_cells[cell_id] = line
                         log_cell(args.log, line)
                 if crawl:
                     for neighbour in sorted(neigh_earfcns):
@@ -459,7 +504,9 @@ def main(argv=None):
             say("looping again (Ctrl+C to stop)")
     except KeyboardInterrupt:
         say("stopped: %d unique cells found" % len(found_cells))
+        final_report(found_cells, args.log)
         return 0
+    final_report(found_cells, args.log)
     return 0
 
 
