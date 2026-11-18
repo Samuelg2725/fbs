@@ -61,6 +61,7 @@ _SWEEP_PLAN = (
 )
 
 _PDSCH = "/home/revector/srsRAN_4G/build/lib/examples/pdsch_ue"
+_DRIVER = "lime"  # SoapySDR driver; overridden by --driver in main()
 _IDENTITY = re.compile(
     r"SIB1 cell identity (\d+)\s+eNB (\d+)\s+sector (\d+)\s+TAC (\d+)\s+PLMN ([\d-]+)"
 )
@@ -127,7 +128,7 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
         "stdbuf", "-oL", "-eL",
         _PDSCH,
         "-I", "soapy",
-        "-a", "driver=lime",
+        "-a", "driver=%s" % _DRIVER,
         "-f", str(hz),
         "-g", str(gain),
         "-Q",
@@ -347,6 +348,8 @@ def main(argv=None):
     seed.add_argument("--earfcn", type=int, help="seed LTE downlink channel number")
     seed.add_argument("--sweep", action="store_true", help="seed from the built-in UK band plan")
     parser.add_argument("--gain", type=float, default=70.0, help="front-end gain passed to pdsch_ue")
+    parser.add_argument("--driver", choices=["lime", "plutosdr"], default="lime",
+                        help="SDR to use: lime (LimeSDR, default) or plutosdr (ADALM-Pluto)")
     parser.add_argument(
         "--cell-id",
         type=int,
@@ -362,6 +365,8 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true", help="stop after one full crawl/sweep instead of looping")
     parser.add_argument("--log", help="append every Cell ID found to this file")
     args = parser.parse_args(argv)
+    global _DRIVER
+    _DRIVER = args.driver
 
     groups = []
     for group in args.group:
