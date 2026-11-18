@@ -286,7 +286,12 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
 
 
 def scan_channel(earfcn, gain, groups, known, dwell, find_seconds, single):
-    """Scan one EARFCN. single=True does one strongest-cell run; else one per group.
+    """Scan one EARFCN.
+
+    single=True   one strongest-cell run (fast, one Cell ID per channel).
+    single=False  a quick presence check first (one strongest-cell run, no dwell);
+                  if nothing syncs the channel is skipped, otherwise all sync
+                  groups are decoded so weak co-channel cells are caught too.
 
     Return (neigh_earfcns, cells, present_pcis) where cells is a list of
     (cell_id, line) and present_pcis is every PCI heard, decoded or not.
@@ -299,7 +304,18 @@ def scan_channel(earfcn, gain, groups, known, dwell, find_seconds, single):
     neigh_earfcns = set()
     cells = []
     present = set()
-    runs = [None] if single else list(groups)
+    if single:
+        runs = [None]
+    else:
+        triage = read_group(earfcn, hz, gain, None, known, 0, find_seconds)
+        if triage["pci"] is None and triage["cell_id"] is None:
+            say("EARFCN %d  nothing here, skipping the groups" % earfcn)
+            return set(), [], set()
+        if triage["pci"] is not None:
+            present.add(triage["pci"])
+        neigh_earfcns.update(triage["neigh_earfcns"])
+        say("EARFCN %d  cell present, decoding all sync groups" % earfcn)
+        runs = list(groups)
     for group in runs:
         result = read_group(earfcn, hz, gain, group, known, dwell, find_seconds)
         if result["pci"] is not None:
@@ -347,8 +363,8 @@ def main(argv=None):
         if group not in groups:
             groups.append(group)
 
-    find_seconds = args.find if args.find is not None else (18 if args.fast else 20)
-    dwell = args.dwell if args.dwell is not None else (8 if args.fast else 30)
+    find_seconds = args.find if args.find is not None else 18
+    dwell = args.dwell if args.dwell is not None else (8 if args.fast else 15)
     crawl = (not args.no_crawl) and (not args.fast)
     single = args.fast
 
@@ -367,7 +383,9 @@ def main(argv=None):
     say(
         "%s; find %d s; dwell %d s; crawl %s. Ctrl+C stops."
         % (
-            "fast: one strongest-cell run per channel" if single else ("groups %s" % " ".join(str(g) for g in groups)),
+            "fast: one strongest-cell run per channel"
+            if single
+            else ("groups %s, empty channels skipped after a quick check" % " ".join(str(g) for g in groups)),
             find_seconds,
             dwell,
             "off" if not crawl else "on",
