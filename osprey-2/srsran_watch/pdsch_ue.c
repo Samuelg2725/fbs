@@ -553,7 +553,12 @@ int main(int argc, char** argv)
    * turn, so cells the strongest-only search would shadow are caught. Each
    * decoded Cell ID is printed by the SIB1 hook; the Python side keeps the
    * distinct ones. With DESHADOW unset this runs exactly once (normal). */
-  int scan_reps = getenv("DESHADOW") ? 5 : 1;
+  int         scan_reps = 1;
+  const char* deshadow  = getenv("DESHADOW");
+  if (deshadow) {
+    int n     = atoi(deshadow); /* DESHADOW=<n> sets the pass count; DESHADOW=1 uses the default */
+    scan_reps = (n > 1) ? n : 10;
+  }
   for (int scan_rep = 0; scan_rep < scan_reps && !go_exit; scan_rep++) {
   if (scan_reps > 1) {
     printf("\n########## DE-SHADOW pass %d/%d ##########\n", scan_rep + 1, scan_reps);

@@ -79,9 +79,10 @@ _SHADOW = re.compile(r"MULTI group (\d+) distinct cells:(.*)")
 # the stock per-group launch path still works with an unmodified pdsch_ue.
 _SCAN_ALL = False
 
-# --deshadow: set DESHADOW=1 for the scan build so it repeats each channel's
+# --deshadow: set DESHADOW=<reps> for the scan build so it repeats each channel's
 # scan, catching cells that share a sync group (shadowed cells). Needs --scan-all.
 _DESHADOW = False
+_DESHADOW_REPS = 10
 
 # SoapySDR radio selection. Overridden from the command line in main(). The
 # Pluto is the default; --driver lime switches pdsch_ue to a LimeSDR. Extra
@@ -456,7 +457,7 @@ def read_channel_all(earfcn, hz, gain, known):
         "-F",
         "-d",
     ]
-    env = dict(os.environ, DESHADOW="1") if _DESHADOW else None
+    env = dict(os.environ, DESHADOW=str(_DESHADOW_REPS)) if _DESHADOW else None
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, env=env)
     streams = [process.stdout, process.stderr]
     pending = {process.stdout: b"", process.stderr: b""}
@@ -710,6 +711,7 @@ def main(argv=None):
     parser.add_argument("--scan-all", action="store_true", help="one pdsch_ue launch per channel that decodes all 3 sync groups in a single open radio session (needs the osprey scan build of pdsch_ue). Faster: one radio open per channel instead of 3-4.")
     parser.add_argument("--shadow-check", action="store_true", help="diagnostic (needs the scan build): sweep and report any sync group holding more than one cell. Use it in a dense/city location to decide whether full de-shadowing is worth building. Does not decode Cell IDs.")
     parser.add_argument("--deshadow", action="store_true", help="repeat each channel's scan several times so cells sharing a sync group (shadowed) are decoded too, not just the strongest. Slower; needs --scan-all and the scan build. Best on a single --earfcn a shadow-check flagged.")
+    parser.add_argument("--deshadow-reps", type=int, default=10, help="how many times --deshadow repeats each channel's scan (default 10; more = better odds of catching an interfering shadowed cell, but slower)")
     parser.add_argument("--triage", action="store_true", help="fast PSS check before each channel; skip channels with no cell (faster sweeps, off by default)")
     parser.add_argument("--triage-threshold", type=float, default=6.0, help="PSS peak/RMS ratio to count a channel as occupied (default 6.0); 0 = measure and print only, never skip (for calibration)")
     parser.add_argument(
@@ -737,8 +739,9 @@ def main(argv=None):
     _WEAK_TIMEOUT = args.weak_timeout
     _SIB1_TIMEOUT = args.sib1_timeout
     _SCAN_ALL = args.scan_all
-    global _DESHADOW
+    global _DESHADOW, _DESHADOW_REPS
     _DESHADOW = args.deshadow
+    _DESHADOW_REPS = max(2, args.deshadow_reps)
     if _DESHADOW and not _SCAN_ALL:
         _SCAN_ALL = True  # de-shadow lives in the scan build's one-launch path
     if _SCAN_ALL:
