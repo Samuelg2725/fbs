@@ -4,6 +4,12 @@
 
 #include "srsran/asn1/rrc.h"
 
+/* Set to 1 by this file when a SIB1 Cell ID is read; pdsch_ue's scan loop (which
+ * defines it) watches this to stop a group as soon as its Cell ID decodes. */
+extern "C" {
+int sib1_found;
+}
+
 static void save_line(const char* line)
 {
   char   ts[32];
@@ -154,4 +160,5 @@ extern "C" void srsran_sib1_print(const uint8_t* payload, uint32_t nbits)
     used += wrote;
   }
   save_line(line);
+  sib1_found = 1;
 }
