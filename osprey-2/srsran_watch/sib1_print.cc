@@ -22,8 +22,11 @@ static void save_line(const char* line)
     fprintf(out, "%s  %s\n", ts, line);
     fclose(out);
   }
-  fprintf(stderr, "\n%s  %s\n", ts, line);
-  fflush(stderr);
+  /* Print to stdout (not stderr) so this line is in the same stream, and
+   * therefore the correct order, as pdsch_ue's "Found Cell_id"/PCI lines. The
+   * Python wrapper can then attach the PCI to this Cell ID. */
+  fprintf(stdout, "\n%s  %s\n", ts, line);
+  fflush(stdout);
 }
 
 /* SIB4: physical cell IDs of neighbours on the SAME carrier frequency.
