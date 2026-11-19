@@ -83,6 +83,14 @@ _SCAN_ALL = False
 # scan, catching cells that share a sync group (shadowed cells). Needs --scan-all.
 _DESHADOW = False
 _DESHADOW_REPS = 10
+# Hard cap on how long the smart sweep will dig one channel, so a channel with a
+# stubborn ghost can't run away (one ate 2.5 minutes before this cap).
+_DESHADOW_MAX_SECONDS = 90
+
+# A PSS peak this weak is almost always noise/sidelobe, not a cell. We still show
+# it, but it does not count as a "cell heard", so it cannot trigger a de-shadow
+# dig. Real cells here run PSR 6-8; the ghosts that waste time sit around 2-2.5.
+_PRESENT_FLOOR = 4.0
 
 # Set when Ctrl+C is caught mid-channel so the sweep stops but the cells already
 # decoded are still reported.
@@ -473,7 +481,13 @@ def read_channel_all(earfcn, hz, gain, known, deshadow=None):
     # ultimate safety net; the binary normally exits on its own. De-shadow repeats
     # the whole scan several times, so allow much longer.
     hard_limit = started + (600 if use_deshadow else 120)
-    stall_secs = 30  # the radio can hang before any output (Lime 30.72 MHz stalls); kill it
+    # Two-phase stall guard. Opening the radio can take a while with no output, so
+    # be patient until the first line. Once output is flowing, a total freeze means
+    # the Lime has hung mid-decode (classic: retuning to the 23.04 MHz rate a false
+    # 15 MHz MIB asked for) - kill it quickly instead of waiting the old 30 s.
+    stall_open = 40   # grace before any output at all
+    stall_run = 12    # freeze tolerance once the process is talking
+    seen_output = False
     last_output = started
     cells = []
     seen = set()
@@ -483,6 +497,7 @@ def read_channel_all(earfcn, hz, gain, known, deshadow=None):
     pci_num = None
     try:
         while time.monotonic() < hard_limit:
+            stall_secs = stall_run if seen_output else stall_open
             if time.monotonic() - last_output > stall_secs:
                 say("scan  no output for %d s - radio stalled, moving on" % stall_secs)
                 break
@@ -500,6 +515,7 @@ def read_channel_all(earfcn, hz, gain, known, deshadow=None):
                     drained = True
                     continue
                 last_output = time.monotonic()
+                seen_output = True
                 lines, pending[stream] = take_lines(pending[stream], chunk)
                 for text in lines:
                     dp = re.search(r"DE-SHADOW pass (\d+)/(\d+)", text)
@@ -515,8 +531,13 @@ def read_channel_all(earfcn, hz, gain, known, deshadow=None):
                     pci = _PCI.search(text)
                     if pci and float(pci.group(3)) > 0:
                         pci_num = int(pci.group(1))
-                        present.add(pci_num)
-                        say("  PCI %s %s  PSR %s" % (pci.group(1), pci.group(2), pci.group(3)))
+                        psr = float(pci.group(3))
+                        # Only a strong peak counts as a cell heard; weak ones are
+                        # shown but ignored so noise can't trigger a de-shadow dig.
+                        if psr >= _PRESENT_FLOOR:
+                            present.add(pci_num)
+                        say("  PCI %s %s  PSR %s%s" % (pci.group(1), pci.group(2), pci.group(3),
+                            "  (weak, ignored)" if psr < _PRESENT_FLOOR else ""))
                     if _RATE.search(text):
                         say("  sample rate %s MHz" % _RATE.search(text).group(1))
                     if _MIB.search(text):
@@ -524,6 +545,8 @@ def read_channel_all(earfcn, hz, gain, known, deshadow=None):
                     found = _IDENTITY.search(text)
                     if found:
                         cell_id = int(found.group(1))
+                        if pci_num is not None:
+                            present.add(pci_num)  # a decoded cell always counts as heard
                         pci_text = ("PCI %d  " % pci_num) if pci_num is not None else ""
                         cell_line = (
                             "%.1f MHz (EARFCN %d)  %s28-bit %s  (0x%07X)  eNB %s  sector %s  TAC %s  PLMN %s"
@@ -699,7 +722,12 @@ def run_deshadow_sweep(seeds, gains, known):
                 % (earfcn, len(present), len(decoded),
                    (" at gain %g" % dig_gain) if multi_gain else ""))
             quiet = 0
+            dig_deadline = time.monotonic() + _DESHADOW_MAX_SECONDS
             while quiet < 2 and not _STOP:
+                if time.monotonic() > dig_deadline:
+                    say("  de-shadow time cap (%ds) reached for this channel - moving on"
+                        % _DESHADOW_MAX_SECONDS)
+                    break
                 _n, more, _p = read_channel_all(earfcn, hz, dig_gain, known, deshadow=True)
                 new = 0
                 for cell_id, line in more:
