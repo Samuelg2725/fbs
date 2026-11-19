@@ -672,9 +672,13 @@ def run_deshadow_sweep(seeds, gain, known):
                 found[cell_id] = line
             decoded.add(cell_id)
         say("EARFCN %d: %d PCI(s) heard, %d Cell ID(s) decoded" % (earfcn, len(present), len(decoded)))
-        # Dig only when a real cell decoded AND extra PCIs were heard (hidden cells).
-        if decoded and len(present) > len(decoded):
-            say("EARFCN %d: more heard than decoded - de-shadowing this channel" % earfcn)
+        # Dig whenever a PCI was heard that we did not get a Cell ID for. That
+        # covers both a hidden co-channel cell (2 heard, 1 decoded) and a weak
+        # cell whose PSS came through but whose SIB1 missed on the quick pass
+        # (1 heard, 0 decoded) - both just need more dwelling passes.
+        if len(present) > len(decoded):
+            say("EARFCN %d: %d heard but only %d decoded - de-shadowing this channel"
+                % (earfcn, len(present), len(decoded)))
             quiet = 0
             while quiet < 2 and not _STOP:
                 _n, more, _p = read_channel_all(earfcn, hz, gain, known, deshadow=True)
