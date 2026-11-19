@@ -690,12 +690,23 @@ int main(int argc, char** argv)
 
   /* Main loop */
   uint64_t sf_cnt          = 0;
+  uint64_t mib_sf_cnt      = 0;
   uint32_t sfn             = 0;
   uint32_t last_decoded_tm = 0;
   while (!go_exit && (sf_cnt < prog_args.nof_subframes || prog_args.nof_subframes == -1)) {
-    /* SCAN: stop this group once its Cell ID (SIB1) is read, or after a safety
-     * cap so a group that never yields SIB1 does not hold the radio forever. */
-    if (sib1_found || sf_cnt > 4000) {
+    /* SCAN: stop this group once its Cell ID (SIB1) is read. Otherwise give a
+     * cell a fair window to decode MIB, and once MIB lands a generous window
+     * for SIB1 -- a real cell gets both quickly even when weak, so these only
+     * cut off syncs that will not yield an ID. */
+    if (sib1_found) {
+      break;
+    }
+    if (state == DECODE_MIB && sf_cnt > 8000) {
+      printf("SCAN: no MIB after sync, giving up on this group\n");
+      break;
+    }
+    if (state == DECODE_PDSCH && mib_sf_cnt > 0 && (sf_cnt - mib_sf_cnt) > 12000) {
+      printf("SCAN: MIB but no SIB1, giving up on this group\n");
       break;
     }
     char input[128];
@@ -758,8 +769,9 @@ int main(int argc, char** argv)
               srsran_pbch_mib_unpack(bch_payload, &cell, &sfn);
               srsran_cell_fprint(stdout, &cell, sfn);
               printf("Decoded MIB. SFN: %d, offset: %d\n", sfn, sfn_offset);
-              sfn   = (sfn + sfn_offset) % 1024;
-              state = DECODE_PDSCH;
+              sfn         = (sfn + sfn_offset) % 1024;
+              state       = DECODE_PDSCH;
+              mib_sf_cnt  = sf_cnt; /* SCAN: start the SIB1 window from here */
             }
           }
           break;
