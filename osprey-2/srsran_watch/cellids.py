@@ -82,10 +82,13 @@ _SCAN_ALL = False
 # --deshadow: set DESHADOW=<reps> for the scan build so it repeats each channel's
 # scan, catching cells that share a sync group (shadowed cells). Needs --scan-all.
 _DESHADOW = False
-_DESHADOW_REPS = 10
+# How many times the scan build repeats a channel internally per launch. Kept low
+# so a dig is quick; the smart sweep also relaunches only while it keeps finding
+# new cells, so there is no need to grind a fixed 10 passes every time.
+_DESHADOW_REPS = 3
 # Hard cap on how long the smart sweep will dig one channel, so a channel with a
 # stubborn ghost can't run away (one ate 2.5 minutes before this cap).
-_DESHADOW_MAX_SECONDS = 90
+_DESHADOW_MAX_SECONDS = 60
 
 # A PSS peak this weak is almost always noise/sidelobe, not a cell. We still show
 # it, but it does not count as a "cell heard", so it cannot trigger a de-shadow
@@ -721,9 +724,8 @@ def run_deshadow_sweep(seeds, gains, known):
             say("EARFCN %d: %d heard but only %d decoded - de-shadowing this channel%s"
                 % (earfcn, len(present), len(decoded),
                    (" at gain %g" % dig_gain) if multi_gain else ""))
-            quiet = 0
             dig_deadline = time.monotonic() + _DESHADOW_MAX_SECONDS
-            while quiet < 2 and not _STOP:
+            while not _STOP:
                 if time.monotonic() > dig_deadline:
                     say("  de-shadow time cap (%ds) reached for this channel - moving on"
                         % _DESHADOW_MAX_SECONDS)
@@ -735,11 +737,12 @@ def run_deshadow_sweep(seeds, gains, known):
                         found[cell_id] = line
                         new += 1
                 if new:
+                    # Found something - the fading opened a window, so keep digging.
                     say("  +%d new cell(s) from de-shadow" % new)
-                    quiet = 0
                 else:
-                    quiet += 1
-                    say("  de-shadow lap added nothing new (%d/2)" % quiet)
+                    # A whole pass of repeats added nothing; nothing is hiding here.
+                    say("  de-shadow found nothing new - moving on")
+                    break
     say("")
     final_report(found)
 
