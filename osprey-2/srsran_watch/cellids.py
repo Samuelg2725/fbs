@@ -650,13 +650,24 @@ def run_shadow_check(seeds, gain):
         say("===== SHADOW CHECK: no group held more than one cell - no shadowing to recover here =====")
 
 
-def run_deshadow_sweep(seeds, gain, known):
+def run_deshadow_sweep(seeds, gains, known):
     """Smart de-shadow sweep: fast-scan every channel, and de-shadow only the
     channels where more cells were heard than decoded (a cell is hiding). Empty,
     noise, and fully-decoded channels are passed over, so the slow repeat work
     only lands where it pays off.
+
+    gains is a list. With more than one gain, every channel's fast pass is read
+    at each gain and the cells merged, so a strong cell that overloads at high
+    gain and a weak cell that needs it are both caught; the dig then runs at the
+    high gain, which hears the most. A single gain behaves as before.
     """
-    say("de-shadow sweep: fast scan every channel, dig only where cells are hidden")
+    multi_gain = len(gains) > 1
+    if multi_gain:
+        say("de-shadow sweep: fast scan every channel at gains %s, dig only where cells are hidden"
+            % ", ".join("%g" % g for g in gains))
+    else:
+        say("de-shadow sweep: fast scan every channel, dig only where cells are hidden")
+    dig_gain = max(gains)
     found = {}
     for earfcn in seeds:
         if _STOP:
@@ -665,23 +676,31 @@ def run_deshadow_sweep(seeds, gain, known):
         if hz is None:
             continue
         say("=== EARFCN %d (%.1f MHz) ===" % (earfcn, hz / 1e6))
-        _neigh, cells, present = read_channel_all(earfcn, hz, gain, known, deshadow=False)
+        present = set()
         decoded = set()
-        for cell_id, line in cells:
-            if cell_id not in found:
-                found[cell_id] = line
-            decoded.add(cell_id)
+        for gain in gains:
+            if _STOP:
+                break
+            if multi_gain:
+                say("gain %g" % gain)
+            _neigh, cells, pres = read_channel_all(earfcn, hz, gain, known, deshadow=False)
+            present |= pres
+            for cell_id, line in cells:
+                if cell_id not in found:
+                    found[cell_id] = line
+                decoded.add(cell_id)
         say("EARFCN %d: %d PCI(s) heard, %d Cell ID(s) decoded" % (earfcn, len(present), len(decoded)))
         # Dig whenever a PCI was heard that we did not get a Cell ID for. That
         # covers both a hidden co-channel cell (2 heard, 1 decoded) and a weak
         # cell whose PSS came through but whose SIB1 missed on the quick pass
         # (1 heard, 0 decoded) - both just need more dwelling passes.
         if len(present) > len(decoded):
-            say("EARFCN %d: %d heard but only %d decoded - de-shadowing this channel"
-                % (earfcn, len(present), len(decoded)))
+            say("EARFCN %d: %d heard but only %d decoded - de-shadowing this channel%s"
+                % (earfcn, len(present), len(decoded),
+                   (" at gain %g" % dig_gain) if multi_gain else ""))
             quiet = 0
             while quiet < 2 and not _STOP:
-                _n, more, _p = read_channel_all(earfcn, hz, gain, known, deshadow=True)
+                _n, more, _p = read_channel_all(earfcn, hz, dig_gain, known, deshadow=True)
                 new = 0
                 for cell_id, line in more:
                     if cell_id not in found:
@@ -881,7 +900,7 @@ def main(argv=None):
 
     if args.sweep and _DESHADOW:
         try:
-            run_deshadow_sweep(seeds, args.gain, known)
+            run_deshadow_sweep(seeds, gains, known)
         except KeyboardInterrupt:
             say("de-shadow sweep stopped")
         return 0
