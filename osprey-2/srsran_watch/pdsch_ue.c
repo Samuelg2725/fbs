@@ -701,11 +701,11 @@ int main(int argc, char** argv)
     if (sib1_found) {
       break;
     }
-    if (state == DECODE_MIB && sf_cnt > 8000) {
+    if (state == DECODE_MIB && sf_cnt > 6000) {
       printf("SCAN: no MIB after sync, giving up on this group\n");
       break;
     }
-    if (state == DECODE_PDSCH && mib_sf_cnt > 0 && (sf_cnt - mib_sf_cnt) > 12000) {
+    if (state == DECODE_PDSCH && mib_sf_cnt > 0 && (sf_cnt - mib_sf_cnt) > 8000) {
       printf("SCAN: MIB but no SIB1, giving up on this group\n");
       break;
     }
