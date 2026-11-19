@@ -146,6 +146,14 @@ def mhz_label(earfcn):
     return "%.1f MHz" % (hz / 1e6) if hz is not None else "outside band table"
 
 
+def parse_gains(spec):
+    """Comma-separated gains like '45,68' -> [45.0, 68.0], or None if empty."""
+    if not spec:
+        return None
+    gains = [float(part) for part in spec.split(",") if part.strip()]
+    return gains or None
+
+
 def say(text):
     line = datetime.now().strftime("%Y-%m-%d %H:%M:%S  ") + text
     print(line, flush=True)
@@ -398,8 +406,6 @@ def scan_channel(earfcn, gain, groups, known, dwell, find_seconds, single):
         say("EARFCN %d is outside the band table, skipping" % earfcn)
         return set(), [], set()
     say("=== EARFCN %d (%.1f MHz) ===" % (earfcn, hz / 1e6))
-    if _TRIAGE and not _triage_channel(hz, gain, earfcn):
-        return set(), [], set()
     neigh_earfcns = set()
     cells = []
     present = set()
@@ -448,6 +454,7 @@ def main(argv=None):
     parser.add_argument("--gain", type=float, default=70.0, help="RX gain passed to pdsch_ue")
     parser.add_argument("--driver", default="plutosdr", help="SoapySDR driver: plutosdr (default) or lime")
     parser.add_argument("--device-args", default="", help="extra Soapy device args, comma-separated, e.g. 'rxant=LNAL' to force the Lime low-band port")
+    parser.add_argument("--gain-sweep", default="", help="read each channel at several gains and merge the cells, e.g. '45,68'. Catches both strong cells that overload at high gain and weak cells that need it. Runs full mode (disables --fast); each cell in the report is tagged with the gain that decoded it.")
     parser.add_argument("--triage", action="store_true", help="fast PSS check before each channel; skip channels with no cell (faster sweeps, off by default)")
     parser.add_argument("--triage-threshold", type=float, default=6.0, help="PSS peak/RMS ratio to count a channel as occupied (default 6.0); 0 = measure and print only, never skip (for calibration)")
     parser.add_argument(
@@ -486,10 +493,15 @@ def main(argv=None):
         if group not in groups:
             groups.append(group)
 
+    gains = parse_gains(args.gain_sweep) or [args.gain]
+    multi_gain = len(gains) > 1
+    if multi_gain and args.fast:
+        say("gain-sweep runs full (non-fast) mode; ignoring --fast")
+    single = args.fast and not multi_gain
     find_seconds = args.find if args.find is not None else 18
-    dwell = args.dwell if args.dwell is not None else (8 if args.fast else 15)
-    crawl = (not args.no_crawl) and (not args.fast)
-    single = args.fast
+    dwell = args.dwell if args.dwell is not None else (8 if single else 15)
+    crawl = (not args.no_crawl) and (not single)
+    triage_gain = max(gains)
 
     if not os.path.isfile(_PDSCH) or not os.access(_PDSCH, os.X_OK):
         sys.exit("pdsch_ue was not found at %s" % _PDSCH)
@@ -514,6 +526,8 @@ def main(argv=None):
             "off" if not crawl else "on",
         )
     )
+    if multi_gain:
+        say("gain-sweep: reading every channel at gains %s and merging" % ", ".join("%g" % g for g in gains))
     if args.cell_id:
         say("known cells: %s" % ", ".join(str(cell) for cell in args.cell_id))
     if args.log:
@@ -530,10 +544,24 @@ def main(argv=None):
                 if earfcn in scanned:
                     continue
                 scanned.add(earfcn)
-                neigh_earfcns, cells, _present = scan_channel(earfcn, args.gain, groups, known, dwell, find_seconds, single)
-                for cell_id, line in cells:
-                    if cell_id not in found_cells:
-                        found_cells[cell_id] = line
+                hz = downlink_hz(earfcn)
+                if hz is None:
+                    say("EARFCN %d is outside the band table, skipping" % earfcn)
+                    continue
+                # One fast PSS triage per channel (at the most sensitive gain).
+                # If it is confidently empty, skip every gain pass on it.
+                if _TRIAGE and not _triage_channel(hz, triage_gain, earfcn):
+                    say("done %s: triage skip, %d cells total, %d channels queued" % (earfcn, len(found_cells), len(queue)))
+                    continue
+                neigh_earfcns = set()
+                for gain in gains:
+                    if multi_gain:
+                        say("--- EARFCN %d at gain %g ---" % (earfcn, gain))
+                    g_neigh, cells, _present = scan_channel(earfcn, gain, groups, known, dwell, find_seconds, single)
+                    neigh_earfcns.update(g_neigh)
+                    for cell_id, line in cells:
+                        if cell_id not in found_cells:
+                            found_cells[cell_id] = line + ("  (gain %g)" % gain if multi_gain else "")
                 if crawl:
                     for neighbour in sorted(neigh_earfcns):
                         if neighbour in scanned or neighbour in queue:
