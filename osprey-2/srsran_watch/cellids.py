@@ -829,8 +829,10 @@ def main(argv=None):
         return 0
 
     found_cells = {}
+    quiet_laps = 0
     try:
         while True:
+            lap_start_count = len(found_cells)
             queue = list(seeds)
             scanned = set()
             while queue:
@@ -875,6 +877,17 @@ def main(argv=None):
                 say("cells found: %s" % ", ".join(str(cell) for cell in sorted(found_cells)))
             if args.once or _STOP:
                 break
+            # De-shadow auto-stop: once a whole lap adds no new cell (twice in a
+            # row, to ride out a probabilistic miss), it has caught what it can.
+            if _DESHADOW and found_cells:
+                if len(found_cells) == lap_start_count:
+                    quiet_laps += 1
+                    say("de-shadow: no new cell this lap (%d/2 quiet laps)" % quiet_laps)
+                    if quiet_laps >= 2:
+                        say("de-shadow: converged - nothing new in 2 laps, stopping")
+                        break
+                else:
+                    quiet_laps = 0
             say("looping again (Ctrl+C to stop)")
     except KeyboardInterrupt:
         say("stopped: %d unique cells found" % len(found_cells))
