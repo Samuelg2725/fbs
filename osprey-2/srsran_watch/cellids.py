@@ -441,14 +441,18 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
                 stream.close()
 
 
-def read_channel_all(earfcn, hz, gain, known):
+def read_channel_all(earfcn, hz, gain, known, deshadow=None):
     """One pdsch_ue launch with the scan build: it opens the radio once and
     decodes every sync group (0,1,2) in that one session, printing a Cell ID
     per group it can read. We read until the process exits and collect them all.
 
+    deshadow overrides the global for this call (the smart sweep runs a fast
+    pass with deshadow=False, then digs a channel with deshadow=True).
+
     Returns (neigh_earfcns, cells, present_pcis). The scan build stops each
     group at its SIB1, so no SIB4/SIB5 neighbour lists are captured here.
     """
+    use_deshadow = _DESHADOW if deshadow is None else deshadow
     say("scan  one radio session, all sync groups")
     command = [
         "stdbuf", "-oL", "-eL",
@@ -461,14 +465,14 @@ def read_channel_all(earfcn, hz, gain, known):
         "-F",
         "-d",
     ]
-    env = dict(os.environ, DESHADOW=str(_DESHADOW_REPS)) if _DESHADOW else None
+    env = dict(os.environ, DESHADOW=str(_DESHADOW_REPS)) if use_deshadow else None
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, env=env)
     streams = [process.stdout, process.stderr]
     pending = {process.stdout: b"", process.stderr: b""}
     started = time.monotonic()
     # ultimate safety net; the binary normally exits on its own. De-shadow repeats
     # the whole scan several times, so allow much longer.
-    hard_limit = started + (600 if _DESHADOW else 120)
+    hard_limit = started + (600 if use_deshadow else 120)
     stall_secs = 30  # the radio can hang before any output (Lime 30.72 MHz stalls); kill it
     last_output = started
     cells = []
@@ -644,6 +648,49 @@ def run_shadow_check(seeds, gain):
                 % (hz / 1e6, earfcn, g, ", ".join("PCI %d" % p for p in pcis)))
     else:
         say("===== SHADOW CHECK: no group held more than one cell - no shadowing to recover here =====")
+
+
+def run_deshadow_sweep(seeds, gain, known):
+    """Smart de-shadow sweep: fast-scan every channel, and de-shadow only the
+    channels where more cells were heard than decoded (a cell is hiding). Empty,
+    noise, and fully-decoded channels are passed over, so the slow repeat work
+    only lands where it pays off.
+    """
+    say("de-shadow sweep: fast scan every channel, dig only where cells are hidden")
+    found = {}
+    for earfcn in seeds:
+        if _STOP:
+            break
+        hz = downlink_hz(earfcn)
+        if hz is None:
+            continue
+        say("=== EARFCN %d (%.1f MHz) ===" % (earfcn, hz / 1e6))
+        _neigh, cells, present = read_channel_all(earfcn, hz, gain, known, deshadow=False)
+        decoded = set()
+        for cell_id, line in cells:
+            if cell_id not in found:
+                found[cell_id] = line
+            decoded.add(cell_id)
+        say("EARFCN %d: %d PCI(s) heard, %d Cell ID(s) decoded" % (earfcn, len(present), len(decoded)))
+        # Dig only when a real cell decoded AND extra PCIs were heard (hidden cells).
+        if decoded and len(present) > len(decoded):
+            say("EARFCN %d: more heard than decoded - de-shadowing this channel" % earfcn)
+            quiet = 0
+            while quiet < 2 and not _STOP:
+                _n, more, _p = read_channel_all(earfcn, hz, gain, known, deshadow=True)
+                new = 0
+                for cell_id, line in more:
+                    if cell_id not in found:
+                        found[cell_id] = line
+                        new += 1
+                if new:
+                    say("  +%d new cell(s) from de-shadow" % new)
+                    quiet = 0
+                else:
+                    quiet += 1
+                    say("  de-shadow lap added nothing new (%d/2)" % quiet)
+    say("")
+    final_report(found)
 
 
 def scan_channel(earfcn, gain, groups, known, dwell, find_seconds, single):
@@ -826,6 +873,13 @@ def main(argv=None):
             run_shadow_check(seeds, args.gain)
         except KeyboardInterrupt:
             say("shadow check stopped")
+        return 0
+
+    if args.sweep and _DESHADOW:
+        try:
+            run_deshadow_sweep(seeds, args.gain, known)
+        except KeyboardInterrupt:
+            say("de-shadow sweep stopped")
         return 0
 
     found_cells = {}
