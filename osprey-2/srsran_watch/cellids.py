@@ -455,7 +455,9 @@ def read_channel_all(earfcn, hz, gain, known):
     streams = [process.stdout, process.stderr]
     pending = {process.stdout: b"", process.stderr: b""}
     started = time.monotonic()
-    hard_limit = started + 120  # safety net; the binary normally exits on its own
+    hard_limit = started + 120  # ultimate safety net; the binary normally exits on its own
+    stall_secs = 30  # the radio can hang before any output (Lime 30.72 MHz stalls); kill it
+    last_output = started
     cells = []
     seen = set()
     present = set()
@@ -464,6 +466,9 @@ def read_channel_all(earfcn, hz, gain, known):
     pci_num = None
     try:
         while time.monotonic() < hard_limit:
+            if time.monotonic() - last_output > stall_secs:
+                say("scan  no output for %d s - radio stalled, moving on" % stall_secs)
+                break
             ready, _, _ = select.select(streams, [], [], 0.5)
             if not ready:
                 if process.poll() is not None:
@@ -477,6 +482,7 @@ def read_channel_all(earfcn, hz, gain, known):
                         streams.remove(stream)
                     drained = True
                     continue
+                last_output = time.monotonic()
                 lines, pending[stream] = take_lines(pending[stream], chunk)
                 for text in lines:
                     grp = _GROUP.search(text)
