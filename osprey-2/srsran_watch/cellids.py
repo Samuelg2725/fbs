@@ -71,6 +71,12 @@ _PCI = re.compile(r"\*?Found Cell_id:\s+(\d+)\s+(FDD|TDD).*PSR=([0-9.]+)")
 _MIB = re.compile(r"Decoded MIB")
 _RATE = re.compile(r"Setting rx sampling rate ([0-9.]+) MHz")
 _MISS = re.compile(r"Could not find any cell")
+_GROUP = re.compile(r"SCAN sync group \(N_id_2\) (\d+)")
+
+# --scan-all: use the one-launch binary that decodes all 3 sync groups in a
+# single open radio session (osprey-2 pdsch_ue scan build). Off by default so
+# the stock per-group launch path still works with an unmodified pdsch_ue.
+_SCAN_ALL = False
 
 # SoapySDR radio selection. Overridden from the command line in main(). The
 # Pluto is the default; --driver lime switches pdsch_ue to a LimeSDR. Extra
@@ -425,6 +431,101 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
                 stream.close()
 
 
+def read_channel_all(earfcn, hz, gain, known):
+    """One pdsch_ue launch with the scan build: it opens the radio once and
+    decodes every sync group (0,1,2) in that one session, printing a Cell ID
+    per group it can read. We read until the process exits and collect them all.
+
+    Returns (neigh_earfcns, cells, present_pcis). The scan build stops each
+    group at its SIB1, so no SIB4/SIB5 neighbour lists are captured here.
+    """
+    say("scan  one radio session, all sync groups")
+    command = [
+        "stdbuf", "-oL", "-eL",
+        _PDSCH,
+        "-I", "soapy",
+        "-a", _soapy_device(),
+        "-f", str(hz),
+        "-g", str(gain),
+        "-Q",
+        "-F",
+        "-d",
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    streams = [process.stdout, process.stderr]
+    pending = {process.stdout: b"", process.stderr: b""}
+    started = time.monotonic()
+    hard_limit = started + 120  # safety net; the binary normally exits on its own
+    cells = []
+    seen = set()
+    present = set()
+    neigh_earfcns = set()
+    neigh_pcis = set()
+    pci_num = None
+    try:
+        while time.monotonic() < hard_limit:
+            ready, _, _ = select.select(streams, [], [], 0.5)
+            if not ready:
+                if process.poll() is not None:
+                    break
+                continue
+            drained = False
+            for stream in ready:
+                chunk = stream.read(4096)
+                if not chunk:
+                    if stream in streams:
+                        streams.remove(stream)
+                    drained = True
+                    continue
+                lines, pending[stream] = take_lines(pending[stream], chunk)
+                for text in lines:
+                    grp = _GROUP.search(text)
+                    if grp:
+                        say("group %s  searching" % grp.group(1))
+                        continue
+                    if _MISS.search(text):
+                        continue
+                    pci = _PCI.search(text)
+                    if pci and float(pci.group(3)) > 0:
+                        pci_num = int(pci.group(1))
+                        present.add(pci_num)
+                        say("  PCI %s %s  PSR %s" % (pci.group(1), pci.group(2), pci.group(3)))
+                    if _RATE.search(text):
+                        say("  sample rate %s MHz" % _RATE.search(text).group(1))
+                    if _MIB.search(text):
+                        say("  MIB decoded")
+                    found = _IDENTITY.search(text)
+                    if found:
+                        cell_id = int(found.group(1))
+                        pci_text = ("PCI %d  " % pci_num) if pci_num is not None else ""
+                        cell_line = (
+                            "%.1f MHz (EARFCN %d)  %s28-bit %s  (0x%07X)  eNB %s  sector %s  TAC %s  PLMN %s"
+                            % (hz / 1e6, earfcn, pci_text, found.group(1), cell_id,
+                               found.group(2), found.group(3), found.group(4), found.group(5))
+                        )
+                        if cell_id not in seen:
+                            seen.add(cell_id)
+                            cells.append((cell_id, cell_line))
+                            shown = "  " + cell_line
+                            if known:
+                                shown += "  MATCH" if cell_id in known else ""
+                            say(shown)
+            if not streams or (drained and process.poll() is not None):
+                break
+        return neigh_earfcns, cells, present
+    finally:
+        if process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        for stream in (process.stdout, process.stderr):
+            if stream:
+                stream.close()
+
+
 def scan_channel(earfcn, gain, groups, known, dwell, find_seconds, single):
     """Scan one EARFCN.
 
@@ -441,6 +542,15 @@ def scan_channel(earfcn, gain, groups, known, dwell, find_seconds, single):
         say("EARFCN %d is outside the band table, skipping" % earfcn)
         return set(), [], set()
     say("=== EARFCN %d (%.1f MHz) ===" % (earfcn, hz / 1e6))
+    if _SCAN_ALL:
+        neigh_earfcns, cells, present = read_channel_all(earfcn, hz, gain, known)
+        decoded = {cid for cid, _line in cells}
+        if present:
+            say("EARFCN %d summary: %d cell(s) heard (PCI %s), %d Cell ID(s) decoded"
+                % (earfcn, len(present), " ".join(str(p) for p in sorted(present)), len(decoded)))
+        else:
+            say("EARFCN %d  nothing here" % earfcn)
+        return neigh_earfcns, cells, present
     neigh_earfcns = set()
     cells = []
     present = set()
@@ -492,6 +602,7 @@ def main(argv=None):
     parser.add_argument("--weak-timeout", type=float, default=5.0, help="give up on a sync group this many seconds after it finds a tower if no MIB has decoded (default 5; 0 = wait the full dwell, old behaviour). MIB, not PSR, is the real gate -- a weak real cell still decodes MIB fast.")
     parser.add_argument("--sib1-timeout", type=float, default=8.0, help="give up this many seconds after MIB decodes if the Cell ID (SIB1) has not (default 8; 0 = wait the full dwell). Catches the overload/too-weak case where MIB reads but SIB1 never will.")
     parser.add_argument("--gain-sweep", default="", help="read each channel at several gains and merge the cells, e.g. '45,68'. Catches both strong cells that overload at high gain and weak cells that need it. Runs full mode (disables --fast); each cell in the report is tagged with the gain that decoded it.")
+    parser.add_argument("--scan-all", action="store_true", help="one pdsch_ue launch per channel that decodes all 3 sync groups in a single open radio session (needs the osprey scan build of pdsch_ue). Faster: one radio open per channel instead of 3-4.")
     parser.add_argument("--triage", action="store_true", help="fast PSS check before each channel; skip channels with no cell (faster sweeps, off by default)")
     parser.add_argument("--triage-threshold", type=float, default=6.0, help="PSS peak/RMS ratio to count a channel as occupied (default 6.0); 0 = measure and print only, never skip (for calibration)")
     parser.add_argument(
@@ -510,7 +621,7 @@ def main(argv=None):
     parser.add_argument("--log", help="append every Cell ID found to this file")
     args = parser.parse_args(argv)
 
-    global _DRIVER, _DEVICE_ARGS, _TRIAGE, _TRIAGE_THRESHOLD, _LOG, _WEAK_TIMEOUT, _SIB1_TIMEOUT
+    global _DRIVER, _DEVICE_ARGS, _TRIAGE, _TRIAGE_THRESHOLD, _LOG, _WEAK_TIMEOUT, _SIB1_TIMEOUT, _SCAN_ALL
     _DRIVER = args.driver
     _DEVICE_ARGS = args.device_args or ""
     _TRIAGE = args.triage
@@ -518,6 +629,9 @@ def main(argv=None):
     _LOG = args.log
     _WEAK_TIMEOUT = args.weak_timeout
     _SIB1_TIMEOUT = args.sib1_timeout
+    _SCAN_ALL = args.scan_all
+    if _SCAN_ALL:
+        say("scan-all: one radio session per channel (needs the scan build of pdsch_ue)")
     say("radio: driver=%s%s" % (_DRIVER, (" " + _DEVICE_ARGS) if _DEVICE_ARGS else ""))
     if _TRIAGE:
         if _TRIAGE_THRESHOLD <= 0:
