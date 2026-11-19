@@ -72,6 +72,7 @@ _MIB = re.compile(r"Decoded MIB")
 _RATE = re.compile(r"Setting rx sampling rate ([0-9.]+) MHz")
 _MISS = re.compile(r"Could not find any cell")
 _GROUP = re.compile(r"SCAN sync group \(N_id_2\) (\d+)")
+_SHADOW = re.compile(r"MULTI group (\d+) distinct cells:(.*)")
 
 # --scan-all: use the one-launch binary that decodes all 3 sync groups in a
 # single open radio session (osprey-2 pdsch_ue scan build). Off by default so
@@ -532,6 +533,97 @@ def read_channel_all(earfcn, hz, gain, known):
                 stream.close()
 
 
+def shadow_check_channel(earfcn, hz, gain):
+    """Launch the scan build with SCAN_MULTI=1 and read the three 'MULTI group N
+    distinct cells' lines, then stop the process. Returns {group: [pci, ...]}.
+
+    More than one PCI in a group means two cells share that sync group -- the
+    case the strongest-only search throws away (shadowing).
+    """
+    env = dict(os.environ, SCAN_MULTI="1")
+    command = [
+        "stdbuf", "-oL", "-eL",
+        _PDSCH,
+        "-I", "soapy",
+        "-a", _soapy_device(),
+        "-f", str(hz),
+        "-g", str(gain),
+        "-Q",
+        "-F",
+        "-d",
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, env=env)
+    streams = [process.stdout, process.stderr]
+    pending = {process.stdout: b"", process.stderr: b""}
+    groups = {}
+    deadline = time.monotonic() + 60
+    try:
+        while time.monotonic() < deadline and len(groups) < 3:
+            ready, _, _ = select.select(streams, [], [], 0.5)
+            if not ready:
+                if process.poll() is not None:
+                    break
+                continue
+            for stream in ready:
+                chunk = stream.read(4096)
+                if not chunk:
+                    if stream in streams:
+                        streams.remove(stream)
+                    continue
+                lines, pending[stream] = take_lines(pending[stream], chunk)
+                for text in lines:
+                    m = _SHADOW.search(text)
+                    if m:
+                        g = int(m.group(1))
+                        pcis = [int(p) for p in re.findall(r"PCI=(\d+)", m.group(2))]
+                        groups[g] = pcis
+                        say("  group %d: %s" % (g, ", ".join("PCI %d" % p for p in pcis) if pcis else "(none)"))
+            if not streams:
+                break
+        return groups
+    finally:
+        if process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        for stream in (process.stdout, process.stderr):
+            if stream:
+                stream.close()
+
+
+def run_shadow_check(seeds, gain):
+    """Sweep the seed channels and report any sync group that holds >1 cell.
+
+    This is the go/no-go for building full de-shadowing: if no group anywhere
+    holds more than one cell, there is nothing for de-shadowing to recover.
+    """
+    say("SHADOW CHECK: scanning for sync groups that hold more than one cell")
+    say("(needs the scan build of pdsch_ue; this is slower than a normal sweep)")
+    hits = []
+    for earfcn in seeds:
+        hz = downlink_hz(earfcn)
+        if hz is None:
+            continue
+        say("=== EARFCN %d (%.1f MHz) ===" % (earfcn, hz / 1e6))
+        groups = shadow_check_channel(earfcn, hz, gain)
+        for g, pcis in sorted(groups.items()):
+            if len(pcis) > 1:
+                hits.append((earfcn, hz, g, pcis))
+                say("  *** group %d holds %d cells (%s) - SHADOWING"
+                    % (g, len(pcis), ", ".join("PCI %d" % p for p in pcis)))
+    say("")
+    if hits:
+        say("===== SHADOW CHECK: %d group(s) hold >1 cell - de-shadowing WOULD help here =====" % len(hits))
+        for earfcn, hz, g, pcis in hits:
+            say("  %.1f MHz (EARFCN %d) group %d: %s"
+                % (hz / 1e6, earfcn, g, ", ".join("PCI %d" % p for p in pcis)))
+    else:
+        say("===== SHADOW CHECK: no group held more than one cell - no shadowing to recover here =====")
+
+
 def scan_channel(earfcn, gain, groups, known, dwell, find_seconds, single):
     """Scan one EARFCN.
 
@@ -609,6 +701,7 @@ def main(argv=None):
     parser.add_argument("--sib1-timeout", type=float, default=8.0, help="give up this many seconds after MIB decodes if the Cell ID (SIB1) has not (default 8; 0 = wait the full dwell). Catches the overload/too-weak case where MIB reads but SIB1 never will.")
     parser.add_argument("--gain-sweep", default="", help="read each channel at several gains and merge the cells, e.g. '45,68'. Catches both strong cells that overload at high gain and weak cells that need it. Runs full mode (disables --fast); each cell in the report is tagged with the gain that decoded it.")
     parser.add_argument("--scan-all", action="store_true", help="one pdsch_ue launch per channel that decodes all 3 sync groups in a single open radio session (needs the osprey scan build of pdsch_ue). Faster: one radio open per channel instead of 3-4.")
+    parser.add_argument("--shadow-check", action="store_true", help="diagnostic (needs the scan build): sweep and report any sync group holding more than one cell. Use it in a dense/city location to decide whether full de-shadowing is worth building. Does not decode Cell IDs.")
     parser.add_argument("--triage", action="store_true", help="fast PSS check before each channel; skip channels with no cell (faster sweeps, off by default)")
     parser.add_argument("--triage-threshold", type=float, default=6.0, help="PSS peak/RMS ratio to count a channel as occupied (default 6.0); 0 = measure and print only, never skip (for calibration)")
     parser.add_argument(
@@ -696,6 +789,13 @@ def main(argv=None):
     if args.log:
         say("logging the full run to %s" % args.log)
     known = set(args.cell_id)
+
+    if args.shadow_check:
+        try:
+            run_shadow_check(seeds, args.gain)
+        except KeyboardInterrupt:
+            say("shadow check stopped")
+        return 0
 
     found_cells = {}
     try:
