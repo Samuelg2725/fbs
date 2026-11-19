@@ -404,6 +404,50 @@ static int scan_all_groups(srsran_rf_t*                  rf,
   return ret;
 }
 
+/* DE-SHADOW EXPERIMENT (SCAN_MULTI=1): scan one sync group and print EVERY
+ * distinct cell the detector saw across the scan frames, not just the mode it
+ * normally keeps. If two cells share a group, both should show up here. */
+static void scan_group_multi(srsran_rf_t* rf, uint32_t nof_rx, cell_search_cfg_t* config, int N_id_2)
+{
+  srsran_ue_cellsearch_t        cs;
+  srsran_ue_cellsearch_result_t dummy;
+  bzero(&dummy, sizeof(dummy));
+  if (srsran_ue_cellsearch_init_multi(&cs, config->max_frames_pss, srsran_rf_recv_wrapper, nof_rx, (void*)rf)) {
+    return;
+  }
+  srsran_rf_set_rx_srate(rf, SRSRAN_CS_SAMP_FREQ);
+  srsran_rf_start_rx_stream(rf, false);
+  srsran_ue_cellsearch_scan_N_id_2(&cs, N_id_2, &dummy);
+  srsran_rf_stop_rx_stream(rf);
+
+  printf("MULTI group %d distinct cells:", N_id_2);
+  uint32_t seen[64];
+  int      nseen = 0;
+  for (uint32_t i = 0; i < cs.nof_valid_frames; i++) {
+    if (cs.candidates[i].peak <= 0.0f) {
+      continue;
+    }
+    uint32_t cid = cs.candidates[i].cell_id;
+    int      dup = 0;
+    for (int j = 0; j < nseen; j++) {
+      if (seen[j] == cid) {
+        dup = 1;
+        break;
+      }
+    }
+    if (!dup && nseen < 64) {
+      seen[nseen++] = cid;
+      printf(" PCI=%u(PSR%.1f)", cid, cs.candidates[i].psr);
+    }
+  }
+  if (nseen == 0) {
+    printf(" (none)");
+  }
+  printf("\n");
+  fflush(stdout);
+  srsran_ue_cellsearch_free(&cs);
+}
+
 int main(int argc, char** argv)
 {
   int ret;
@@ -509,6 +553,11 @@ int main(int argc, char** argv)
   bzero(scan_found, sizeof(scan_found));
 #ifndef DISABLE_RF
   if (!prog_args.input_file_name) {
+    if (getenv("SCAN_MULTI")) {
+      for (int g = 0; g < 3; g++) {
+        scan_group_multi(&rf, prog_args.rf_nof_rx_ant, &cell_detect_config, g);
+      }
+    }
     scan_all_groups(&rf, prog_args.rf_nof_rx_ant, &cell_detect_config, scan_found);
     printf("Pre-scan PSR: g0=%.2f g1=%.2f g2=%.2f\n", scan_found[0].psr, scan_found[1].psr, scan_found[2].psr);
   }
