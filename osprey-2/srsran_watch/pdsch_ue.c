@@ -379,6 +379,31 @@ srsran_netsink_t net_sink, net_sink_signal;
 void srsran_sib1_print(const uint8_t* payload, uint32_t nbits);
 int  sib1_found = 0;
 
+/* SCAN iter-3: one cellsearch over the air that fills the strongest cell in each
+ * of the three sync groups, so groups with no signal can be skipped without a
+ * full per-group search. Returns >0 if any cell was detected, 0 none, <0 error. */
+static int scan_all_groups(srsran_rf_t*                  rf,
+                           uint32_t                      nof_rx,
+                           cell_search_cfg_t*            config,
+                           srsran_ue_cellsearch_result_t found[3])
+{
+  srsran_ue_cellsearch_t cs;
+  bzero(found, 3 * sizeof(srsran_ue_cellsearch_result_t));
+  if (srsran_ue_cellsearch_init_multi(&cs, config->max_frames_pss, srsran_rf_recv_wrapper, nof_rx, (void*)rf)) {
+    return -1;
+  }
+  if (config->nof_valid_pss_frames) {
+    srsran_ue_cellsearch_set_nof_valid_frames(&cs, config->nof_valid_pss_frames);
+  }
+  srsran_rf_set_rx_srate(rf, SRSRAN_CS_SAMP_FREQ);
+  srsran_rf_start_rx_stream(rf, false);
+  uint32_t max_peak = 0;
+  int      ret      = srsran_ue_cellsearch_scan(&cs, found, &max_peak);
+  srsran_rf_stop_rx_stream(rf);
+  srsran_ue_cellsearch_free(&cs);
+  return ret;
+}
+
 int main(int argc, char** argv)
 {
   int ret;
@@ -479,6 +504,16 @@ int main(int argc, char** argv)
   }
 #endif
 
+  /* SCAN iter-3: one combined cellsearch so empty groups can be skipped. */
+  srsran_ue_cellsearch_result_t scan_found[3];
+  bzero(scan_found, sizeof(scan_found));
+#ifndef DISABLE_RF
+  if (!prog_args.input_file_name) {
+    scan_all_groups(&rf, prog_args.rf_nof_rx_ant, &cell_detect_config, scan_found);
+    printf("Pre-scan PSR: g0=%.2f g1=%.2f g2=%.2f\n", scan_found[0].psr, scan_found[1].psr, scan_found[2].psr);
+  }
+#endif
+
   /* SCAN: decode every sync group (N_id_2 = 0,1,2) in ONE open radio session,
    * instead of relaunching the whole program (and reopening the radio) once per
    * group. The radio was opened and tuned above; it stays open across groups. */
@@ -489,6 +524,10 @@ int main(int argc, char** argv)
     printf("\n===== SCAN sync group (N_id_2) %d =====\n", scan_group);
 
 #ifndef DISABLE_RF
+    if (!prog_args.input_file_name && scan_found[scan_group].psr < 1.5) {
+      printf("SCAN: group %d empty in pre-scan (PSR %.2f), skipping\n", scan_group, scan_found[scan_group].psr);
+      continue;
+    }
     if (!prog_args.input_file_name) {
       uint32_t ntrial = 0;
       do {
