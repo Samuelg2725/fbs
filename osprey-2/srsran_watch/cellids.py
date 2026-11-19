@@ -84,6 +84,10 @@ _SCAN_ALL = False
 _DESHADOW = False
 _DESHADOW_REPS = 10
 
+# Set when Ctrl+C is caught mid-channel so the sweep stops but the cells already
+# decoded are still reported.
+_STOP = False
+
 # SoapySDR radio selection. Overridden from the command line in main(). The
 # Pluto is the default; --driver lime switches pdsch_ue to a LimeSDR. Extra
 # device args (e.g. rxant=LNAL to force the low-band port) append after the
@@ -527,7 +531,12 @@ def read_channel_all(earfcn, hz, gain, known):
                             say(shown)
             if not streams or (drained and process.poll() is not None):
                 break
-        return neigh_earfcns, cells, present
+    except KeyboardInterrupt:
+        # Keep (don't lose) the cells already decoded this channel, e.g. during
+        # a long de-shadow run, and tell the main loop to stop after.
+        global _STOP
+        _STOP = True
+        say("  stopped - keeping the %d cell(s) decoded so far" % len(cells))
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGINT)
@@ -539,6 +548,7 @@ def read_channel_all(earfcn, hz, gain, known):
         for stream in (process.stdout, process.stderr):
             if stream:
                 stream.close()
+    return neigh_earfcns, cells, present
 
 
 def shadow_check_channel(earfcn, hz, gain):
@@ -842,6 +852,10 @@ def main(argv=None):
                     for cell_id, line in cells:
                         if cell_id not in found_cells:
                             found_cells[cell_id] = line + ("  (gain %g)" % gain if multi_gain else "")
+                    if _STOP:
+                        break
+                if _STOP:
+                    break
                 if crawl:
                     for neighbour in sorted(neigh_earfcns):
                         if neighbour in scanned or neighbour in queue:
@@ -855,7 +869,7 @@ def main(argv=None):
             say("pass complete: %d unique cells across %d channels" % (len(found_cells), len(scanned)))
             if found_cells:
                 say("cells found: %s" % ", ".join(str(cell) for cell in sorted(found_cells)))
-            if args.once:
+            if args.once or _STOP:
                 break
             say("looping again (Ctrl+C to stop)")
     except KeyboardInterrupt:
