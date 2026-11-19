@@ -95,6 +95,12 @@ _LOG = None
 # decodes MIB is noise/too-weak. 0 disables the early abort (old behaviour).
 _WEAK_TIMEOUT = 5.0
 
+# Seconds to wait for SIB1 (the Cell ID) after MIB decodes before giving up.
+# A cell at a usable SNR decodes SIB1 within ~1-2 s of MIB; if MIB came but
+# SIB1 will not (overload at the wrong gain, or too weak) it never arrives, so
+# stop instead of holding the full dwell. 0 disables it.
+_SIB1_TIMEOUT = 8.0
+
 
 def _soapy_device():
     """The -a device string for pdsch_ue, e.g. 'driver=lime,rxant=LNAL'."""
@@ -261,6 +267,7 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
     saw_pci = False
     mib_seen = False
     pci_found_at = None
+    mib_seen_at = None
     pci_num = None
     cell_id = None
     cell_line = None
@@ -281,6 +288,14 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
                     and pci_found_at is not None
                     and time.monotonic() - pci_found_at >= _WEAK_TIMEOUT):
                 say("%s  no MIB %.0f s after sync, giving up (too weak to read)" % (tag, _WEAK_TIMEOUT))
+                break
+            # MIB decoded but SIB1 (the Cell ID) has not arrived. At a usable
+            # SNR it comes within ~1-2 s; if it has not by now it will not, so
+            # stop instead of holding the full dwell.
+            if (_SIB1_TIMEOUT > 0 and mib_seen and cell_id is None
+                    and mib_seen_at is not None
+                    and time.monotonic() - mib_seen_at >= _SIB1_TIMEOUT):
+                say("%s  MIB but no SIB1 %.0f s on, giving up (too weak for the cell ID)" % (tag, _SIB1_TIMEOUT))
                 break
             remaining = max(0, deadline - time.monotonic())
             ready, _, _ = select.select(streams, [], [], min(0.5, remaining))
@@ -314,6 +329,8 @@ def read_group(earfcn, hz, gain, group, known, dwell, find_seconds):
                         say("%s  MIB decoded, reading SIBs" % tag)
                         last_note = time.monotonic()
                         saw_pci = True
+                        if not mib_seen:
+                            mib_seen_at = time.monotonic()
                         mib_seen = True
                         deadline = min(limit, time.monotonic() + dwell)
                     found = _IDENTITY.search(text)
@@ -473,6 +490,7 @@ def main(argv=None):
     parser.add_argument("--driver", default="plutosdr", help="SoapySDR driver: plutosdr (default) or lime")
     parser.add_argument("--device-args", default="", help="extra Soapy device args, comma-separated, e.g. 'rxant=LNAL' to force the Lime low-band port")
     parser.add_argument("--weak-timeout", type=float, default=5.0, help="give up on a sync group this many seconds after it finds a tower if no MIB has decoded (default 5; 0 = wait the full dwell, old behaviour). MIB, not PSR, is the real gate -- a weak real cell still decodes MIB fast.")
+    parser.add_argument("--sib1-timeout", type=float, default=8.0, help="give up this many seconds after MIB decodes if the Cell ID (SIB1) has not (default 8; 0 = wait the full dwell). Catches the overload/too-weak case where MIB reads but SIB1 never will.")
     parser.add_argument("--gain-sweep", default="", help="read each channel at several gains and merge the cells, e.g. '45,68'. Catches both strong cells that overload at high gain and weak cells that need it. Runs full mode (disables --fast); each cell in the report is tagged with the gain that decoded it.")
     parser.add_argument("--triage", action="store_true", help="fast PSS check before each channel; skip channels with no cell (faster sweeps, off by default)")
     parser.add_argument("--triage-threshold", type=float, default=6.0, help="PSS peak/RMS ratio to count a channel as occupied (default 6.0); 0 = measure and print only, never skip (for calibration)")
@@ -492,13 +510,14 @@ def main(argv=None):
     parser.add_argument("--log", help="append every Cell ID found to this file")
     args = parser.parse_args(argv)
 
-    global _DRIVER, _DEVICE_ARGS, _TRIAGE, _TRIAGE_THRESHOLD, _LOG, _WEAK_TIMEOUT
+    global _DRIVER, _DEVICE_ARGS, _TRIAGE, _TRIAGE_THRESHOLD, _LOG, _WEAK_TIMEOUT, _SIB1_TIMEOUT
     _DRIVER = args.driver
     _DEVICE_ARGS = args.device_args or ""
     _TRIAGE = args.triage
     _TRIAGE_THRESHOLD = args.triage_threshold
     _LOG = args.log
     _WEAK_TIMEOUT = args.weak_timeout
+    _SIB1_TIMEOUT = args.sib1_timeout
     say("radio: driver=%s%s" % (_DRIVER, (" " + _DEVICE_ARGS) if _DEVICE_ARGS else ""))
     if _TRIAGE:
         if _TRIAGE_THRESHOLD <= 0:
@@ -548,6 +567,8 @@ def main(argv=None):
     )
     if _WEAK_TIMEOUT > 0:
         say("weak-group timeout: drop a group %g s after sync if no MIB decodes" % _WEAK_TIMEOUT)
+    if _SIB1_TIMEOUT > 0:
+        say("SIB1 timeout: drop a group %g s after MIB if no Cell ID decodes" % _SIB1_TIMEOUT)
     if multi_gain:
         say("gain-sweep: reading every channel at gains %s and merging" % ", ".join("%g" % g for g in gains))
     if args.cell_id:
