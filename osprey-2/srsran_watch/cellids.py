@@ -498,6 +498,10 @@ def read_channel_all(earfcn, hz, gain, known):
                 last_output = time.monotonic()
                 lines, pending[stream] = take_lines(pending[stream], chunk)
                 for text in lines:
+                    dp = re.search(r"DE-SHADOW pass (\d+)/(\d+)", text)
+                    if dp:
+                        say("--- de-shadow pass %s/%s ---" % (dp.group(1), dp.group(2)))
+                        continue
                     grp = _GROUP.search(text)
                     if grp:
                         say("group %s  searching" % grp.group(1))
