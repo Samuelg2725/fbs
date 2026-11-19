@@ -689,8 +689,10 @@ int main(int argc, char** argv)
   }
 
   /* Main loop */
-  uint64_t sf_cnt          = 0;
-  uint64_t mib_sf_cnt      = 0;
+  uint64_t       sf_cnt = 0;
+  struct timeval scan_t0;              /* SCAN: group decode start, for wall-clock timeouts */
+  gettimeofday(&scan_t0, NULL);
+  struct timeval scan_mib_t = {0, 0};  /* SCAN: time MIB decoded */
   uint32_t sfn             = 0;
   uint32_t last_decoded_tm = 0;
   while (!go_exit && (sf_cnt < prog_args.nof_subframes || prog_args.nof_subframes == -1)) {
@@ -701,11 +703,13 @@ int main(int argc, char** argv)
     if (sib1_found) {
       break;
     }
-    if (state == DECODE_MIB && sf_cnt > 6000) {
+    struct timeval scan_now;
+    gettimeofday(&scan_now, NULL);
+    if (state == DECODE_MIB && (scan_now.tv_sec - scan_t0.tv_sec) > 6) {
       printf("SCAN: no MIB after sync, giving up on this group\n");
       break;
     }
-    if (state == DECODE_PDSCH && mib_sf_cnt > 0 && (sf_cnt - mib_sf_cnt) > 8000) {
+    if (state == DECODE_PDSCH && scan_mib_t.tv_sec != 0 && (scan_now.tv_sec - scan_mib_t.tv_sec) > 8) {
       printf("SCAN: MIB but no SIB1, giving up on this group\n");
       break;
     }
@@ -771,7 +775,7 @@ int main(int argc, char** argv)
               printf("Decoded MIB. SFN: %d, offset: %d\n", sfn, sfn_offset);
               sfn         = (sfn + sfn_offset) % 1024;
               state       = DECODE_PDSCH;
-              mib_sf_cnt  = sf_cnt; /* SCAN: start the SIB1 window from here */
+              gettimeofday(&scan_mib_t, NULL); /* SCAN: start the SIB1 window from here */
             }
           }
           break;
