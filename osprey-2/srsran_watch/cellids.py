@@ -79,6 +79,10 @@ _SHADOW = re.compile(r"MULTI group (\d+) distinct cells:(.*)")
 # the stock per-group launch path still works with an unmodified pdsch_ue.
 _SCAN_ALL = False
 
+# --deshadow: set DESHADOW=1 for the scan build so it repeats each channel's
+# scan, catching cells that share a sync group (shadowed cells). Needs --scan-all.
+_DESHADOW = False
+
 # SoapySDR radio selection. Overridden from the command line in main(). The
 # Pluto is the default; --driver lime switches pdsch_ue to a LimeSDR. Extra
 # device args (e.g. rxant=LNAL to force the low-band port) append after the
@@ -452,11 +456,14 @@ def read_channel_all(earfcn, hz, gain, known):
         "-F",
         "-d",
     ]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    env = dict(os.environ, DESHADOW="1") if _DESHADOW else None
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, env=env)
     streams = [process.stdout, process.stderr]
     pending = {process.stdout: b"", process.stderr: b""}
     started = time.monotonic()
-    hard_limit = started + 120  # ultimate safety net; the binary normally exits on its own
+    # ultimate safety net; the binary normally exits on its own. De-shadow repeats
+    # the whole scan several times, so allow much longer.
+    hard_limit = started + (600 if _DESHADOW else 120)
     stall_secs = 30  # the radio can hang before any output (Lime 30.72 MHz stalls); kill it
     last_output = started
     cells = []
@@ -702,6 +709,7 @@ def main(argv=None):
     parser.add_argument("--gain-sweep", default="", help="read each channel at several gains and merge the cells, e.g. '45,68'. Catches both strong cells that overload at high gain and weak cells that need it. Runs full mode (disables --fast); each cell in the report is tagged with the gain that decoded it.")
     parser.add_argument("--scan-all", action="store_true", help="one pdsch_ue launch per channel that decodes all 3 sync groups in a single open radio session (needs the osprey scan build of pdsch_ue). Faster: one radio open per channel instead of 3-4.")
     parser.add_argument("--shadow-check", action="store_true", help="diagnostic (needs the scan build): sweep and report any sync group holding more than one cell. Use it in a dense/city location to decide whether full de-shadowing is worth building. Does not decode Cell IDs.")
+    parser.add_argument("--deshadow", action="store_true", help="repeat each channel's scan several times so cells sharing a sync group (shadowed) are decoded too, not just the strongest. Slower; needs --scan-all and the scan build. Best on a single --earfcn a shadow-check flagged.")
     parser.add_argument("--triage", action="store_true", help="fast PSS check before each channel; skip channels with no cell (faster sweeps, off by default)")
     parser.add_argument("--triage-threshold", type=float, default=6.0, help="PSS peak/RMS ratio to count a channel as occupied (default 6.0); 0 = measure and print only, never skip (for calibration)")
     parser.add_argument(
@@ -729,8 +737,14 @@ def main(argv=None):
     _WEAK_TIMEOUT = args.weak_timeout
     _SIB1_TIMEOUT = args.sib1_timeout
     _SCAN_ALL = args.scan_all
+    global _DESHADOW
+    _DESHADOW = args.deshadow
+    if _DESHADOW and not _SCAN_ALL:
+        _SCAN_ALL = True  # de-shadow lives in the scan build's one-launch path
     if _SCAN_ALL:
         say("scan-all: one radio session per channel (needs the scan build of pdsch_ue)")
+    if _DESHADOW:
+        say("de-shadow: repeating each channel's scan to catch cells sharing a sync group")
     say("radio: driver=%s%s" % (_DRIVER, (" " + _DEVICE_ARGS) if _DEVICE_ARGS else ""))
     if _TRIAGE:
         if _TRIAGE_THRESHOLD <= 0:

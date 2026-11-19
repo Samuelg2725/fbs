@@ -548,6 +548,17 @@ int main(int argc, char** argv)
   }
 #endif
 
+  /* DE-SHADOW (DESHADOW=1): repeat the whole group scan several times. Across
+   * the repeats, fading lets each cell sharing a sync group win and decode in
+   * turn, so cells the strongest-only search would shadow are caught. Each
+   * decoded Cell ID is printed by the SIB1 hook; the Python side keeps the
+   * distinct ones. With DESHADOW unset this runs exactly once (normal). */
+  int scan_reps = getenv("DESHADOW") ? 5 : 1;
+  for (int scan_rep = 0; scan_rep < scan_reps && !go_exit; scan_rep++) {
+  if (scan_reps > 1) {
+    printf("\n########## DE-SHADOW pass %d/%d ##########\n", scan_rep + 1, scan_reps);
+  }
+
   /* SCAN iter-3: one combined cellsearch so empty groups can be skipped. */
   srsran_ue_cellsearch_result_t scan_found[3];
   bzero(scan_found, sizeof(scan_found));
@@ -1129,6 +1140,7 @@ int main(int argc, char** argv)
   }
 #endif
   } /* ===== end SCAN sync-group loop ===== */
+  } /* ===== end DE-SHADOW repeat loop ===== */
 
   for (int i = 0; i < SRSRAN_MAX_CODEWORDS; i++) {
     if (data[i]) {
